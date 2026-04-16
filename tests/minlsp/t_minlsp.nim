@@ -285,6 +285,42 @@ block get_hover_returns_none_for_unknown_word:
   let hoverOpt = lsp.getHover("file://" & testFile, 0, 500)
   doAssert not hoverOpt.isSome
 
+block get_hover_prefers_closest_overload:
+  let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n")
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  let content = readFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+  
+  let hover1 = lsp.getHover("file://" & testFile, 0, 6)
+  doAssert hover1.isSome
+  doAssert hover1.get().contents.value.contains("foo(x: int): int")
+  doAssert not hover1.get().contents.value.contains("foo(x: string): string")
+  
+  let hover2 = lsp.getHover("file://" & testFile, 3, 6)
+  doAssert hover2.isSome
+  doAssert hover2.get().contents.value.contains("foo(x: string): string")
+  doAssert not hover2.get().contents.value.contains("foo(x: int): int")
+
+cleanupTempFiles()
+
+block find_definition_prefers_closest_overload:
+  let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n")
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  let content = readFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+  
+  let def1 = lsp.findDefinition("file://" & testFile, 0, 6)
+  doAssert def1.isSome
+  doAssert def1.get().range.startPos.line == 0
+  
+  let def2 = lsp.findDefinition("file://" & testFile, 3, 6)
+  doAssert def2.isSome
+  doAssert def2.get().range.startPos.line == 3
+
+cleanupTempFiles()
+
 # MinLSP Document Symbol Tests (use sample projects)
 
 block get_document_symbols_returns_symbols:

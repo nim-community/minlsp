@@ -175,16 +175,39 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): O
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
   if word.len == 0:
     return none(Location)
-  for file, tags in lsp.ctagsCache:
-    for tag in tags:
-      if tag.name == word and tag.kind in {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}:
-        return some(Location(
-          uri: pathToUri(tag.file),
-          range: Range(
-            startPos: Position(line: tag.line - 1, character: 0),
-            endPos: Position(line: tag.line - 1, character: 0)
-          )
-        ))
+
+  var bestTag: Option[Tag]
+  var bestDistance = high(int)
+  let defKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}
+
+  if lsp.ctagsCache.hasKey(filePath):
+    for tag in lsp.ctagsCache[filePath]:
+      if tag.name == word and tag.kind in defKinds:
+        let distance = abs((tag.line - 1) - line)
+        if distance < bestDistance:
+          bestDistance = distance
+          bestTag = some(tag)
+
+  if bestTag.isNone:
+    for file, tags in lsp.ctagsCache:
+      if file == filePath:
+        continue
+      for tag in tags:
+        if tag.name == word and tag.kind in defKinds:
+          bestTag = some(tag)
+          break
+      if bestTag.isSome:
+        break
+
+  if bestTag.isSome:
+    let tag = bestTag.get()
+    return some(Location(
+      uri: pathToUri(tag.file),
+      range: Range(
+        startPos: Position(line: tag.line - 1, character: 0),
+        endPos: Position(line: tag.line - 1, character: 0)
+      )
+    ))
   return none(Location)
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
@@ -248,15 +271,36 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
   if word.len == 0:
     return none(Hover)
-  for file, tags in lsp.ctagsCache:
-    for tag in tags:
+
+  var bestTag: Option[Tag]
+  var bestDistance = high(int)
+
+  if lsp.ctagsCache.hasKey(filePath):
+    for tag in lsp.ctagsCache[filePath]:
       if tag.name == word:
-        return some(Hover(
-          contents: MarkupContent(
-            kind: MarkupKind.Markdown,
-            value: buildHoverText(tag)
-          )
-        ))
+        let distance = abs((tag.line - 1) - line)
+        if distance < bestDistance:
+          bestDistance = distance
+          bestTag = some(tag)
+
+  if bestTag.isNone:
+    for file, tags in lsp.ctagsCache:
+      if file == filePath:
+        continue
+      for tag in tags:
+        if tag.name == word:
+          bestTag = some(tag)
+          break
+      if bestTag.isSome:
+        break
+
+  if bestTag.isSome:
+    return some(Hover(
+      contents: MarkupContent(
+        kind: MarkupKind.Markdown,
+        value: buildHoverText(bestTag.get())
+      )
+    ))
   return none(Hover)
 
 proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[SignatureHelp] =
@@ -302,31 +346,54 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
   if start > pos:
     return none(SignatureHelp)
   let word = currentLine[start..pos]
-  for file, tags in lsp.ctagsCache:
-    for tag in tags:
-      if tag.name == word and tag.kind in {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkConverter, tkIterator}:
-        var label = tag.name
-        if tag.signature.len > 0:
-          label = tag.name & tag.signature
-        else:
-          label = tagKindName(tag.kind) & " " & tag.name & "()"
-        var params: seq[ParameterInformation] = @[]
-        # Simple parameter extraction from signature like (a: int, b: string)
-        if tag.signature.len > 2 and tag.signature.startsWith("(") and tag.signature.endsWith(")"):
-          let inner = tag.signature[1..^2]
-          for raw in inner.split(","):
-            let p = raw.strip()
-            if p.len > 0:
-              params.add(ParameterInformation(label: p, documentation: ""))
-        return some(SignatureHelp(
-          signatures: @[SignatureInformation(
-            label: label,
-            documentation: tag.docComment,
-            parameters: params
-          )],
-          activeSignature: 0,
-          activeParameter: 0
-        ))
+
+  var bestTag: Option[Tag]
+  var bestDistance = high(int)
+  let sigKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkConverter, tkIterator}
+
+  if lsp.ctagsCache.hasKey(filePath):
+    for tag in lsp.ctagsCache[filePath]:
+      if tag.name == word and tag.kind in sigKinds:
+        let distance = abs((tag.line - 1) - line)
+        if distance < bestDistance:
+          bestDistance = distance
+          bestTag = some(tag)
+
+  if bestTag.isNone:
+    for file, tags in lsp.ctagsCache:
+      if file == filePath:
+        continue
+      for tag in tags:
+        if tag.name == word and tag.kind in sigKinds:
+          bestTag = some(tag)
+          break
+      if bestTag.isSome:
+        break
+
+  if bestTag.isSome:
+    let tag = bestTag.get()
+    var label = tag.name
+    if tag.signature.len > 0:
+      label = tag.name & tag.signature
+    else:
+      label = tagKindName(tag.kind) & " " & tag.name & "()"
+    var params: seq[ParameterInformation] = @[]
+    # Simple parameter extraction from signature like (a: int, b: string)
+    if tag.signature.len > 2 and tag.signature.startsWith("(") and tag.signature.endsWith(")"):
+      let inner = tag.signature[1..^2]
+      for raw in inner.split(","):
+        let p = raw.strip()
+        if p.len > 0:
+          params.add(ParameterInformation(label: p, documentation: ""))
+    return some(SignatureHelp(
+      signatures: @[SignatureInformation(
+        label: label,
+        documentation: tag.docComment,
+        parameters: params
+      )],
+      activeSignature: 0,
+      activeParameter: 0
+    ))
   return none(SignatureHelp)
 
 proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, includeDeclaration: bool): seq[Location] =
