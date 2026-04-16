@@ -443,9 +443,18 @@ block get_references_returns_locations:
   discard lsp.generateCtagsForFile(testFile)
   lsp.updateFile("file://" & testFile, content)
 
-  # References for "main" proc at line 4, col 6
-  let refs = lsp.getReferences("file://" & testFile, 4, 6, true)
-  doAssert refs.len > 0
+  # References for "greet" proc at line 5, col 8 in main.nim
+  let refs = lsp.getReferences("file://" & testFile, 5, 8, true)
+  doAssert refs.len >= 2
+  var foundMain = false
+  var foundUtils = false
+  for r in refs:
+    if r.uri == "file://" & testFile:
+      foundMain = true
+    if r.uri == "file://" & utilsFile:
+      foundUtils = true
+  doAssert foundMain
+  doAssert foundUtils
 
 block rename_symbol_returns_edits:
   let testFile = testdataDir / "simple_project" / "src" / "main.nim"
@@ -456,8 +465,18 @@ block rename_symbol_returns_edits:
   discard lsp.generateCtagsForFile(testFile)
   lsp.updateFile("file://" & testFile, content)
 
-  let edits = lsp.renameSymbol("file://" & testFile, 4, 6, "newMain")
-  doAssert edits.len > 0
+  # Rename "greet" at line 5, col 8 in main.nim
+  let edits = lsp.renameSymbol("file://" & testFile, 5, 8, "newGreet")
+  doAssert edits.len >= 2
+  var foundMain = false
+  var foundUtils = false
+  for e in edits:
+    if e.uri == "file://" & testFile:
+      foundMain = true
+    if e.uri == "file://" & utilsFile:
+      foundUtils = true
+  doAssert foundMain
+  doAssert foundUtils
 
 block get_workspace_symbols_returns_matching_symbols:
   let testFile = testdataDir / "simple_project" / "src" / "utils.nim"

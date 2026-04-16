@@ -1,4 +1,4 @@
-import std/[asyncdispatch, asyncfile, json, options, os, osproc, streams, strformat, strutils, tables, terminal, times]
+import std/[asyncdispatch, asyncfile, json, options, os, osproc, sets, streams, strformat, strutils, tables, terminal, times]
 import minlsp/[ntagger, logger]
 import compiler/[ast, syntaxes, options, pathutils, idents, msgs]
 import minlsp/baseprotocol
@@ -335,8 +335,14 @@ proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, inc
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
   if word.len == 0:
     return
-  # Search all open files for occurrences
-  for path, text in lsp.openFiles:
+  var processed = initHashSet[string]()
+  # Search all workspace files for occurrences
+  for path in lsp.ctagsCache.keys:
+    processed.incl(path)
+    let text = try:
+      if lsp.openFiles.hasKey(path): lsp.openFiles[path] else: readFile(path)
+    except CatchableError:
+      continue
     let lines = text.splitLines
     for i, ln in lines:
       var col = 0
@@ -344,7 +350,29 @@ proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, inc
         let idx = ln.find(word, col)
         if idx == -1:
           break
-        # Check word boundaries
+        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        if leftOk and rightOk:
+          result.add(Location(
+            uri: pathToUri(path),
+            range: Range(
+              startPos: Position(line: i, character: idx),
+              endPos: Position(line: i, character: idx + word.len)
+            )
+          ))
+        col = idx + word.len
+  # Also search open files that might not be in ctagsCache yet
+  for path in lsp.openFiles.keys:
+    if path in processed:
+      continue
+    let text = lsp.openFiles[path]
+    let lines = text.splitLines
+    for i, ln in lines:
+      var col = 0
+      while col < ln.len:
+        let idx = ln.find(word, col)
+        if idx == -1:
+          break
         let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
         let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
         if leftOk and rightOk:
@@ -441,18 +469,41 @@ proc renameSymbol*(lsp: MinLSP, fileUri: string, line: int, character: int, newN
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
   if word.len == 0 or newName.len == 0:
     return
-  let lines = content.splitLines
-  for i, ln in lines:
-    var col = 0
-    while col < ln.len:
-      let idx = ln.find(word, col)
-      if idx == -1:
-        break
-      let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-      let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-      if leftOk and rightOk:
-        result.add((uri: fileUri, startLine: i, startCol: idx, endLine: i, endCol: idx + word.len))
-      col = idx + word.len
+  var processed = initHashSet[string]()
+  for path in lsp.ctagsCache.keys:
+    processed.incl(path)
+    let text = try:
+      if lsp.openFiles.hasKey(path): lsp.openFiles[path] else: readFile(path)
+    except CatchableError:
+      continue
+    let lines = text.splitLines
+    for i, ln in lines:
+      var col = 0
+      while col < ln.len:
+        let idx = ln.find(word, col)
+        if idx == -1:
+          break
+        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        if leftOk and rightOk:
+          result.add((uri: pathToUri(path), startLine: i, startCol: idx, endLine: i, endCol: idx + word.len))
+        col = idx + word.len
+  # Also include open files that might not be in ctagsCache yet
+  for path in lsp.openFiles.keys:
+    if path in processed:
+      continue
+    let lines = lsp.openFiles[path].splitLines
+    for i, ln in lines:
+      var col = 0
+      while col < ln.len:
+        let idx = ln.find(word, col)
+        if idx == -1:
+          break
+        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        if leftOk and rightOk:
+          result.add((uri: pathToUri(path), startLine: i, startCol: idx, endLine: i, endCol: idx + word.len))
+        col = idx + word.len
 
 proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
   let filePath = uriToPath(fileUri)

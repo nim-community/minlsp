@@ -386,4 +386,48 @@ block workspace_symbol_search:
       break
   doAssert found
 
+block find_references_across_workspace_files:
+  let lsp = initMinLSP()
+  let mainFile = testdataDir / "simple_project" / "src" / "main.nim"
+  let utilsFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let mainContent = readFile(mainFile)
+
+  discard lsp.generateCtagsForFile(utilsFile)
+  discard lsp.generateCtagsForFile(mainFile)
+  lsp.updateFile("file://" & mainFile, mainContent)
+
+  let refs = lsp.getReferences("file://" & mainFile, 5, 8, true)
+  doAssert refs.len >= 2
+  var foundMain = false
+  var foundUtils = false
+  for r in refs:
+    if r.uri == "file://" & mainFile:
+      foundMain = true
+    if r.uri == "file://" & utilsFile:
+      foundUtils = true
+  doAssert foundMain
+  doAssert foundUtils
+
+block workspace_rename_across_files:
+  let lsp = initMinLSP()
+  let mainFile = testdataDir / "simple_project" / "src" / "main.nim"
+  let utilsFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let mainContent = readFile(mainFile)
+
+  discard lsp.generateCtagsForFile(utilsFile)
+  discard lsp.generateCtagsForFile(mainFile)
+  lsp.updateFile("file://" & mainFile, mainContent)
+
+  let edits = lsp.renameSymbol("file://" & mainFile, 5, 8, "sayHello")
+  doAssert edits.len >= 2
+  var foundMain = false
+  var foundUtils = false
+  for e in edits:
+    if e.uri == "file://" & mainFile:
+      foundMain = true
+    if e.uri == "file://" & utilsFile:
+      foundUtils = true
+  doAssert foundMain
+  doAssert foundUtils
+
 # Tests pass silently

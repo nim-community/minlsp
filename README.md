@@ -100,12 +100,8 @@ minlsp consists of:
 ### Running Tests
 
 ```bash
-# Run integration tests
-nim c -r tests/run_tests.nim
-
-# Run unit tests
-nim c -r tests/test_lsp.nim
-nim c -r tests/test_protocol.nim
+# Run all tests
+nimble test
 ```
 
 ### Project Structure
@@ -113,14 +109,16 @@ nim c -r tests/test_protocol.nim
 ```
 minlsp/
 ├── src/
-│   ├── minlsp.nim      # Main LSP server implementation
-│   └── ntagger.nim     # ntagger library integration
+│   ├── minlsp.nim           # Main LSP server implementation
+│   └── minlsp/
+│       └── ntagger.nim      # ctags generator integration
 ├── tests/
-│   ├── test_lsp.nim    # Core LSP tests
-│   ├── test_protocol.nim # Protocol tests
-│   └── run_tests.nim   # Test runner
-├── minlsp.nimble       # Nimble configuration
-└── README.md           # This file
+│   ├── minlsp/              # Core LSP tests
+│   ├── protocol/            # Protocol tests
+│   ├── integration/         # Integration tests
+│   └── ntagger/             # ntagger tests
+├── minlsp.nimble            # Nimble configuration
+└── README.md                # This file
 ```
 
 ## Comparison with Other Nim LSP Servers
@@ -133,7 +131,7 @@ minlsp/
 | Document Symbols | ✅ | ✅ | ✅ |
 | Find References | ✅ | ✅ | ✅ |
 | Signature Help | ✅ | ✅ | ✅ |
-| Rename | ❌ | ❌ | ✅ |
+| Rename | ✅ (text-based) | ❌ | ✅ |
 | Formatting | ❌ | ✅ | ✅ |
 | Memory Usage | Low | Medium | High |
 | Startup Time | Fast | Medium | Slow |
@@ -143,9 +141,8 @@ minlsp trades some advanced features for speed and simplicity.
 ## Limitations
 
 - No semantic analysis (type checking, error reporting)
-- Find References only searches currently open files (not full workspace)
 - No code formatting
-- No refactoring support (rename, extract method, etc.)
+- Rename and Find References are workspace-wide text-based, not semantic (may match unrelated identifiers with the same name)
 
 ## Contributing
 
