@@ -397,4 +397,70 @@ block tag_output_sanitizes_newlines_in_signature:
   # Newlines should be replaced with spaces
   doAssert not output.contains("\nline2")
 
+block collect_tags_includes_object_fields:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  var conf = newConfigRef()
+  var cache = newIdentCache()
+  let tags = collectTagsForFile(conf, cache, testFile, includePrivate = true)
+
+  var foundName = false
+  var foundAge = false
+  for tag in tags:
+    if tag.name == "name":
+      foundName = true
+      doAssert tag.kind == tkVar
+      doAssert tag.signature.contains("string")
+    if tag.name == "age":
+      foundAge = true
+      doAssert tag.kind == tkVar
+      doAssert tag.signature.contains("int")
+
+  doAssert foundName
+  doAssert foundAge
+
+block collect_tags_includes_enum_members:
+  let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
+  var conf = newConfigRef()
+  var cache = newIdentCache()
+  let tags = collectTagsForFile(conf, cache, testFile, includePrivate = true)
+
+  var foundActive = false
+  var foundInactive = false
+  var foundPending = false
+  for tag in tags:
+    case tag.name
+    of "Active":
+      foundActive = true
+      doAssert tag.kind == tkConst
+    of "Inactive":
+      foundInactive = true
+      doAssert tag.kind == tkConst
+    of "Pending":
+      foundPending = true
+      doAssert tag.kind == tkConst
+    else: discard
+
+  doAssert foundActive
+  doAssert foundInactive
+  doAssert foundPending
+
+block collect_tags_includes_variant_object_fields:
+  let testFile = testdataDir / "generic_types" / "src" / "containers.nim"
+  var conf = newConfigRef()
+  var cache = newIdentCache()
+  let tags = collectTagsForFile(conf, cache, testFile, includePrivate = true)
+
+  var foundValue = false
+  var foundError = false
+  for tag in tags:
+    if tag.name == "value" and tag.signature.contains("T"):
+      foundValue = true
+      doAssert tag.kind == tkVar
+    if tag.name == "error" and tag.signature.contains("E"):
+      foundError = true
+      doAssert tag.kind == tkVar
+
+  doAssert foundValue
+  doAssert foundError
+
 # Tests pass silently

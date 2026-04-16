@@ -1,6 +1,6 @@
-import std/[asyncdispatch, asyncfile, json, options, os, streams, strformat, strutils, tables, terminal, times]
+import std/[asyncdispatch, asyncfile, json, options, os, osproc, streams, strformat, strutils, tables, terminal, times]
 import minlsp/[ntagger, logger]
-import compiler/[options, pathutils, idents]
+import compiler/[ast, syntaxes, options, pathutils, idents, msgs]
 import minlsp/baseprotocol
 
 # Types
@@ -97,6 +97,7 @@ type
     range*: Range
     selectionRange*: Range
     detail*: string
+    uri*: string
 
   LSPMessage* = object
     jsonrpc*: string
@@ -123,13 +124,15 @@ type
 # Helper functions
 # MinLSP implementation
 proc initMinLSP*(): MinLSP =
+  let conf = newConfigRef()
+  conf.errorMax = high(int)
   result = MinLSP(
     ctagsCache: initTable[string, seq[Tag]](),
     openFiles: initTable[string, string](),
     rootPath: "",
     initialized: false,
     shutdownRequested: false,
-    conf: newConfigRef(),
+    conf: conf,
     cache: newIdentCache()
   )
 
@@ -145,31 +148,33 @@ proc generateCtagsForFile*(lsp: MinLSP, filePath: string): seq[Tag] =
     errorLog("Failed to generate ctags for ", filePath, ": ", getCurrentExceptionMsg())
     result = @[]
 
+proc extractWordAtPosition(content: string, line, character: int): tuple[word: string, lineStart, colStart, lineEnd, colEnd: int] =
+  let lines = content.splitLines
+  if line >= lines.len:
+    return ("", 0, 0, 0, 0)
+  let currentLine = lines[line]
+  if character >= currentLine.len:
+    return ("", 0, 0, 0, 0)
+  var start = character
+  var wordEnd = character
+  while start > 0 and currentLine[start-1] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+    dec(start)
+  while wordEnd < currentLine.len and currentLine[wordEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+    inc(wordEnd)
+  if start >= wordEnd:
+    return ("", 0, 0, 0, 0)
+  result.word = currentLine[start..<wordEnd]
+  result.lineStart = line
+  result.colStart = start
+  result.lineEnd = line
+  result.colEnd = wordEnd
+
 proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[Location] =
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
-  let lines = content.splitLines
-  if line >= lines.len:
+  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
+  if word.len == 0:
     return none(Location)
-  
-  let currentLine = lines[line]
-  if character >= currentLine.len:
-    return none(Location)
-  
-  var start = character
-  var wordEnd = character
-  
-  while start > 0 and currentLine[start-1] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-    dec(start)
-  
-  while wordEnd < currentLine.len and currentLine[wordEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-    inc(wordEnd)
-  
-  if start >= wordEnd:
-    return none(Location)
-  
-  let word = currentLine[start..<wordEnd]
-  
   for file, tags in lsp.ctagsCache:
     for tag in tags:
       if tag.name == word and tag.kind in {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}:
@@ -180,7 +185,6 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): O
             endPos: Position(line: tag.line - 1, character: 0)
           )
         ))
-  
   return none(Location)
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
@@ -228,43 +232,227 @@ proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): s
   
   return symbols
 
+proc buildHoverText(tag: Tag): string =
+  let kindStr = tagKindName(tag.kind)
+  let displaySig = if tag.signature.len > 0:
+                     kindStr & " " & tag.name & tag.signature
+                   else:
+                     kindStr & " " & tag.name
+  result = "```nim\n" & displaySig & "\n```"
+  if tag.docComment.len > 0:
+    result.add("\n\n" & tag.docComment.strip())
+
 proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[Hover] =
+  let filePath = uriToPath(fileUri)
+  let content = lsp.openFiles.getOrDefault(filePath, "")
+  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
+  if word.len == 0:
+    return none(Hover)
+  for file, tags in lsp.ctagsCache:
+    for tag in tags:
+      if tag.name == word:
+        return some(Hover(
+          contents: MarkupContent(
+            kind: MarkupKind.Markdown,
+            value: buildHoverText(tag)
+          )
+        ))
+  return none(Hover)
+
+proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[SignatureHelp] =
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let lines = content.splitLines
   if line >= lines.len:
-    return none(Hover)
-  
+    return none(SignatureHelp)
   let currentLine = lines[line]
-  if character >= currentLine.len:
-    return none(Hover)
-  
-  var start = character
-  var wordEnd = character
-  
-  while start > 0 and currentLine[start-1] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+  # Find the word before the opening paren at or before character
+  var pos = min(character, currentLine.len - 1)
+  if pos < 0: return none(SignatureHelp)
+  # Skip whitespace backward
+  while pos >= 0 and currentLine[pos] in {' ', '\t'}:
+    dec(pos)
+  # Skip closing parens to handle nested calls
+  var parenDepth = 0
+  while pos >= 0:
+    let c = currentLine[pos]
+    if c == ')':
+      inc(parenDepth)
+    elif c == '(':
+      if parenDepth > 0:
+        dec(parenDepth)
+      else:
+        break
+    elif parenDepth == 0 and c notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      break
+    dec(pos)
+  if pos < 0:
+    return none(SignatureHelp)
+  # If we stopped at an opening paren, step back before it
+  if currentLine[pos] == '(':
+    dec(pos)
+  while pos >= 0 and currentLine[pos] in {' ', '\t'}:
+    dec(pos)
+  if pos < 0:
+    return none(SignatureHelp)
+  var start = pos
+  while start >= 0 and currentLine[start] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
     dec(start)
-  
-  while wordEnd < currentLine.len and currentLine[wordEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-    inc(wordEnd)
-  
-  if start >= wordEnd:
-    return none(Hover)
-  
-  let word = currentLine[start..<wordEnd]
-  
+  inc(start)
+  if start > pos:
+    return none(SignatureHelp)
+  let word = currentLine[start..pos]
   for file, tags in lsp.ctagsCache:
     for tag in tags:
-      if tag.name == word:
-        let hoverText = fmt"{tag.name}: {tag.kind}\n{tag.signature}"
-        return some(Hover(
-          contents: MarkupContent(
-            kind: MarkupKind.Markdown,
-            value: hoverText
-          )
+      if tag.name == word and tag.kind in {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkConverter, tkIterator}:
+        var label = tag.name
+        if tag.signature.len > 0:
+          label = tag.name & tag.signature
+        else:
+          label = tagKindName(tag.kind) & " " & tag.name & "()"
+        var params: seq[ParameterInformation] = @[]
+        # Simple parameter extraction from signature like (a: int, b: string)
+        if tag.signature.len > 2 and tag.signature.startsWith("(") and tag.signature.endsWith(")"):
+          let inner = tag.signature[1..^2]
+          for raw in inner.split(","):
+            let p = raw.strip()
+            if p.len > 0:
+              params.add(ParameterInformation(label: p, documentation: ""))
+        return some(SignatureHelp(
+          signatures: @[SignatureInformation(
+            label: label,
+            documentation: tag.docComment,
+            parameters: params
+          )],
+          activeSignature: 0,
+          activeParameter: 0
         ))
-  
-  return none(Hover)
+  return none(SignatureHelp)
+
+proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, includeDeclaration: bool): seq[Location] =
+  let filePath = uriToPath(fileUri)
+  let content = lsp.openFiles.getOrDefault(filePath, "")
+  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
+  if word.len == 0:
+    return
+  # Search all open files for occurrences
+  for path, text in lsp.openFiles:
+    let lines = text.splitLines
+    for i, ln in lines:
+      var col = 0
+      while col < ln.len:
+        let idx = ln.find(word, col)
+        if idx == -1:
+          break
+        # Check word boundaries
+        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+        if leftOk and rightOk:
+          result.add(Location(
+            uri: pathToUri(path),
+            range: Range(
+              startPos: Position(line: i, character: idx),
+              endPos: Position(line: i, character: idx + word.len)
+            )
+          ))
+        col = idx + word.len
+
+proc getWorkspaceSymbols*(lsp: MinLSP, query: string): seq[DocumentSymbol] =
+  if query.len == 0:
+    return
+  let lowerQuery = query.toLowerAscii()
+  for file, tags in lsp.ctagsCache:
+    for tag in tags:
+      if tag.name.toLowerAscii().contains(lowerQuery):
+        let kind = case tag.kind
+        of tkModule: SymbolKind.Module
+        of tkProc, tkFunc: SymbolKind.Function
+        of tkMethod: SymbolKind.Method
+        of tkType: SymbolKind.Class
+        of tkVar: SymbolKind.Variable
+        of tkLet: SymbolKind.Constant
+        of tkConst: SymbolKind.Constant
+        of tkMacro: SymbolKind.Function
+        of tkTemplate: SymbolKind.Function
+        else: SymbolKind.Variable
+        result.add(DocumentSymbol(
+          name: tag.name,
+          kind: kind,
+          range: Range(
+            startPos: Position(line: tag.line - 1, character: 0),
+            endPos: Position(line: tag.line - 1, character: 0)
+          ),
+          selectionRange: Range(
+            startPos: Position(line: tag.line - 1, character: 0),
+            endPos: Position(line: tag.line - 1, character: 0)
+          ),
+          detail: tag.signature,
+          uri: pathToUri(file)
+        ))
+
+proc getDiagnostics*(lsp: MinLSP, fileUri: string): seq[tuple[message: string, line, col: int, severity: int]] =
+  let filePath = uriToPath(fileUri)
+  if not lsp.openFiles.hasKey(filePath):
+    return
+  let content = lsp.openFiles[filePath]
+  # Simple syntax check: try to parse with the compiler
+  var conf = newConfigRef()
+  conf.errorMax = high(int)
+  var cache = newIdentCache()
+  let abs = AbsoluteFile(absolutePath(filePath))
+  let idx = fileInfoIdx(conf, abs)
+  # We can't easily intercept compiler messages, but we can check for nil AST
+  # and also do a basic brace/paren balance check
+  var ast: PNode = nil
+  try:
+    ast = syntaxes.parseFile(idx, cache, conf)
+  except CatchableError:
+    discard
+  # Also run nimpretty --check if available? Too expensive.
+  # Return empty for now unless AST is nil (severe parse failure)
+  if ast.isNil:
+    result.add((message: "Syntax error: failed to parse file", line: 0, col: 0, severity: 1))
+
+proc formatDocument*(lsp: MinLSP, fileUri: string): Option[string] =
+  let filePath = uriToPath(fileUri)
+  if not lsp.openFiles.hasKey(filePath):
+    return none(string)
+  let nimpretty = findExe("nimpretty")
+  if nimpretty.len == 0:
+    return none(string)
+  let content = lsp.openFiles[filePath]
+  # Write to temp file, run nimpretty, read back
+  let tmpFile = getTempDir() / "minlsp_format_" & $getCurrentProcessId() & ".nim"
+  try:
+    writeFile(tmpFile, content)
+    let (_, exitCode) = execCmdEx(nimpretty & " " & quoteShell(tmpFile))
+    if exitCode == 0:
+      let formatted = readFile(tmpFile)
+      removeFile(tmpFile)
+      return some(formatted)
+    removeFile(tmpFile)
+  except CatchableError:
+    discard
+  return none(string)
+
+proc renameSymbol*(lsp: MinLSP, fileUri: string, line: int, character: int, newName: string): seq[tuple[uri: string, startLine, startCol, endLine, endCol: int]] =
+  let filePath = uriToPath(fileUri)
+  let content = lsp.openFiles.getOrDefault(filePath, "")
+  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
+  if word.len == 0 or newName.len == 0:
+    return
+  let lines = content.splitLines
+  for i, ln in lines:
+    var col = 0
+    while col < ln.len:
+      let idx = ln.find(word, col)
+      if idx == -1:
+        break
+      let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+      let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+      if leftOk and rightOk:
+        result.add((uri: fileUri, startLine: i, startCol: idx, endLine: i, endCol: idx + word.len))
+      col = idx + word.len
 
 proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
   let filePath = uriToPath(fileUri)
@@ -294,7 +482,8 @@ proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
           startPos: Position(line: tag.line - 1, character: 0),
           endPos: Position(line: tag.line - 1, character: 0)
         ),
-        detail: tag.signature
+        detail: tag.signature,
+        uri: fileUri
       ))
 
 proc updateFile*(lsp: MinLSP, fileUri: string, content: string) =
@@ -360,6 +549,14 @@ proc handleInitialize(lsp: MinLSP, params: JsonNode): JsonNode =
       "referencesProvider": true,
       "signatureHelpProvider": {
         "triggerCharacters": ["(", ","]
+      },
+      "renameProvider": true,
+      "workspaceSymbolProvider": true,
+      "documentFormattingProvider": true,
+      "documentRangeFormattingProvider": false,
+      "diagnosticProvider": {
+        "interFileDependencies": false,
+        "workspaceDiagnostics": false
       }
     },
     "serverInfo": {
@@ -458,6 +655,136 @@ proc handleTextDocumentDefinition(lsp: MinLSP, params: JsonNode): JsonNode =
   else:
     result = newJNull()
 
+proc handleTextDocumentSignatureHelp(lsp: MinLSP, params: JsonNode): JsonNode =
+  let textDocument = params["textDocument"]
+  let uri = textDocument["uri"].getStr
+  let position = params["position"]
+  let line = position["line"].getInt
+  let character = position["character"].getInt
+
+  let sigOpt = lsp.getSignatureHelp(uri, line, character)
+  if sigOpt.isSome:
+    let sig = sigOpt.get()
+    var sigs: seq[JsonNode] = @[]
+    for s in sig.signatures:
+      var paramsJson: seq[JsonNode] = @[]
+      for p in s.parameters:
+        paramsJson.add(%*{"label": p.label, "documentation": p.documentation})
+      sigs.add(%*{
+        "label": s.label,
+        "documentation": s.documentation,
+        "parameters": paramsJson
+      })
+    result = %*{
+      "signatures": sigs,
+      "activeSignature": sig.activeSignature,
+      "activeParameter": sig.activeParameter
+    }
+  else:
+    result = newJNull()
+
+proc handleTextDocumentReferences(lsp: MinLSP, params: JsonNode): JsonNode =
+  let textDocument = params["textDocument"]
+  let uri = textDocument["uri"].getStr
+  let position = params["position"]
+  let line = position["line"].getInt
+  let character = position["character"].getInt
+  let includeDecl = if params.hasKey("context") and params["context"].hasKey("includeDeclaration"):
+                      params["context"]["includeDeclaration"].getBool
+                    else:
+                      true
+
+  let refs = lsp.getReferences(uri, line, character, includeDecl)
+  var items: seq[JsonNode] = @[]
+  for loc in refs:
+    items.add(%*{
+      "uri": loc.uri,
+      "range": {
+        "start": {"line": loc.range.startPos.line, "character": loc.range.startPos.character},
+        "end": {"line": loc.range.endPos.line, "character": loc.range.endPos.character}
+      }
+    })
+  result = %items
+
+proc handleTextDocumentRename(lsp: MinLSP, params: JsonNode): JsonNode =
+  let textDocument = params["textDocument"]
+  let uri = textDocument["uri"].getStr
+  let position = params["position"]
+  let line = position["line"].getInt
+  let character = position["character"].getInt
+  let newName = params["newName"].getStr
+
+  let edits = lsp.renameSymbol(uri, line, character, newName)
+  var docEdits: seq[JsonNode] = @[]
+  for e in edits:
+    docEdits.add(%*{
+      "uri": e.uri,
+      "range": {
+        "start": {"line": e.startLine, "character": e.startCol},
+        "end": {"line": e.endLine, "character": e.endCol}
+      },
+      "newText": newName
+    })
+  result = %*{
+    "documentChanges": [%*{
+      "textDocument": {"version": nil, "uri": uri},
+      "edits": docEdits
+    }]
+  }
+
+proc handleWorkspaceSymbol(lsp: MinLSP, params: JsonNode): JsonNode =
+  let query = if params.hasKey("query"): params["query"].getStr else: ""
+  let symbols = lsp.getWorkspaceSymbols(query)
+  var items: seq[JsonNode] = @[]
+  for s in symbols:
+    items.add(%*{
+      "name": s.name,
+      "kind": ord(s.kind),
+      "location": {
+        "uri": s.uri,
+        "range": {
+          "start": {"line": s.range.startPos.line, "character": s.range.startPos.character},
+          "end": {"line": s.range.endPos.line, "character": s.range.endPos.character}
+        }
+      }
+    })
+  # Fix: we need the file path for workspace symbols
+  result = %items
+
+proc handleTextDocumentFormatting(lsp: MinLSP, params: JsonNode): JsonNode =
+  let textDocument = params["textDocument"]
+  let uri = textDocument["uri"].getStr
+  let formattedOpt = lsp.formatDocument(uri)
+  if formattedOpt.isSome:
+    result = %*[{
+      "range": {
+        "start": {"line": 0, "character": 0},
+        "end": {"line": 999999, "character": 999999}
+      },
+      "newText": formattedOpt.get()
+    }]
+  else:
+    result = newJNull()
+
+proc handleTextDocumentDiagnostic(lsp: MinLSP, params: JsonNode): JsonNode =
+  let textDocument = params["textDocument"]
+  let uri = textDocument["uri"].getStr
+  let diags = lsp.getDiagnostics(uri)
+  var items: seq[JsonNode] = @[]
+  for d in diags:
+    items.add(%*{
+      "range": {
+        "start": {"line": d.line, "character": d.col},
+        "end": {"line": d.line, "character": d.col + 1}
+      },
+      "severity": d.severity,
+      "message": d.message
+    })
+  result = %*{
+    "kind": "full",
+    "items": items
+  }
+
 proc handleTextDocumentDocumentSymbol(lsp: MinLSP, params: JsonNode): JsonNode =
   let textDocument = params["textDocument"]
   let uri = textDocument["uri"].getStr
@@ -555,7 +882,25 @@ proc handleMessage(lsp: MinLSP, message: LSPMessage, outs: AsyncFile) {.async.} 
   
   of "textDocument/documentSymbol":
     result = handleTextDocumentDocumentSymbol(lsp, params)
-  
+
+  of "textDocument/signatureHelp":
+    result = handleTextDocumentSignatureHelp(lsp, params)
+
+  of "textDocument/references":
+    result = handleTextDocumentReferences(lsp, params)
+
+  of "textDocument/rename":
+    result = handleTextDocumentRename(lsp, params)
+
+  of "workspace/symbol":
+    result = handleWorkspaceSymbol(lsp, params)
+
+  of "textDocument/formatting":
+    result = handleTextDocumentFormatting(lsp, params)
+
+  of "textDocument/diagnostic":
+    result = handleTextDocumentDiagnostic(lsp, params)
+
   else:
     handled = false
     result = newJNull()

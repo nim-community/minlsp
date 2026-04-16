@@ -365,4 +365,116 @@ block location_object_creation:
   doAssert loc.uri == "file:///test.nim"
   doAssert loc.range.startPos.line == 0
 
+# Object field and enum member tests
+
+block get_hover_returns_hover_info_for_object_field:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  # Hover on "name" field at line 12, col 4
+  let hoverOpt = lsp.getHover("file://" & testFile, 12, 4)
+  doAssert hoverOpt.isSome
+  let hover = hoverOpt.get()
+  doAssert hover.contents.value.contains("name")
+
+block get_hover_returns_hover_info_for_enum_member:
+  let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  # Hover on "Active" enum member at line 40, col 4
+  let hoverOpt = lsp.getHover("file://" & testFile, 40, 4)
+  doAssert hoverOpt.isSome
+  let hover = hoverOpt.get()
+  doAssert hover.contents.value.contains("Active")
+
+block find_definition_returns_location_for_object_field:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let defLocation = lsp.findDefinition("file://" & testFile, 12, 4)
+  doAssert defLocation.isSome
+  let loc = defLocation.get()
+  doAssert loc.uri == "file://" & testFile
+
+block find_definition_returns_location_for_enum_member:
+  let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let defLocation = lsp.findDefinition("file://" & testFile, 40, 4)
+  doAssert defLocation.isSome
+  let loc = defLocation.get()
+  doAssert loc.uri == "file://" & testFile
+
+# New LSP capability tests
+
+block get_signature_help_returns_signature_info:
+  let testFile = testdataDir / "simple_project" / "src" / "main.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  let utilsFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  discard lsp.generateCtagsForFile(utilsFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  # Signature help on "greet(" at line 5, col 12 (the opening paren)
+  let sigOpt = lsp.getSignatureHelp("file://" & testFile, 5, 12)
+  doAssert sigOpt.isSome
+  let sig = sigOpt.get()
+  doAssert sig.signatures.len > 0
+  doAssert sig.signatures[0].label.contains("greet")
+
+block get_references_returns_locations:
+  let testFile = testdataDir / "simple_project" / "src" / "main.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  let utilsFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  discard lsp.generateCtagsForFile(utilsFile)
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  # References for "main" proc at line 4, col 6
+  let refs = lsp.getReferences("file://" & testFile, 4, 6, true)
+  doAssert refs.len > 0
+
+block rename_symbol_returns_edits:
+  let testFile = testdataDir / "simple_project" / "src" / "main.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  let utilsFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  discard lsp.generateCtagsForFile(utilsFile)
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let edits = lsp.renameSymbol("file://" & testFile, 4, 6, "newMain")
+  doAssert edits.len > 0
+
+block get_workspace_symbols_returns_matching_symbols:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+
+  let symbols = lsp.getWorkspaceSymbols("greet")
+  doAssert symbols.len > 0
+  doAssert symbols[0].name == "greet"
+
+block get_diagnostics_returns_empty_for_valid_file:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  lsp.updateFile("file://" & testFile, content)
+
+  let diags = lsp.getDiagnostics("file://" & testFile)
+  doAssert diags.len == 0
+
 # Tests pass silently - only output on failure

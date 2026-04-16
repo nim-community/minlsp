@@ -15,6 +15,7 @@ type
     line*: int
     kind*: TagKind
     signature*: string
+    docComment*: string
 
 proc tagKindName*(k: TagKind): string =
   case k
@@ -31,12 +32,47 @@ proc tagKindName*(k: TagKind): string =
   of tkTemplate: "template"
   of tkModule: "module"
 
+proc extractDocComment(n: PNode): string =
+  ## Extracts the doc comment from a definition node.
+  ## Nim stores doc comments as nkCommentStmt children inside bodies.
+  if n.isNil: return ""
+  if n.comment.len > 0:
+    return n.comment
+  # Atomic nodes (identifiers, literals, etc.) have no children
+  if n.kind <= nkNilLit:
+    return ""
+  # For routine defs, the body (nkStmtList) is typically the last child
+  if n.kind in {nkProcDef, nkFuncDef, nkMethodDef, nkIteratorDef,
+                nkMacroDef, nkTemplateDef, nkConverterDef} and n.len > 6:
+    let body = n[n.len - 1]
+    if not body.isNil and body.kind == nkStmtList:
+      for j in 0 ..< min(body.len, 3):
+        let stmt = body[j]
+        if stmt.isNil: continue
+        if stmt.kind == nkCommentStmt and stmt.comment.len > 0:
+          return stmt.comment
+  # General fallback: search all children for nkCommentStmt or nested stmt lists
+  for i in 0 ..< n.len:
+    let child = n[i]
+    if child.isNil: continue
+    if child.kind == nkCommentStmt and child.comment.len > 0:
+      return child.comment
+    if child.kind == nkStmtList:
+      for j in 0 ..< min(child.len, 3):
+        let stmt = child[j]
+        if stmt.isNil: continue
+        if stmt.kind == nkCommentStmt and stmt.comment.len > 0:
+          return stmt.comment
+        if stmt.kind == nkStmtList and stmt.len > 0 and stmt[0].kind == nkCommentStmt and stmt[0].comment.len > 0:
+          return stmt[0].comment
+  ""
+
 proc addTag(tags: var seq[Tag], file: string, line: int, name: string, k: TagKind,
-            signature = "") =
+            signature = "", docComment = "") =
   if name.len == 0:
     return
   tags.add Tag(name: name, file: file, line: line, kind: k,
-      signature: signature)
+      signature: signature, docComment: docComment)
 
 proc nodeName(n: PNode): string =
   ## Extracts the plain identifier name for a symbol definition node.
@@ -141,6 +177,49 @@ proc buildSignature(n: PNode): string =
     result.add " .}"
 
 proc collectTagsFromAst(n: PNode, file: string, tags: var seq[Tag],
+    includePrivate: bool)
+
+proc collectFields(body: PNode, file: string, tags: var seq[Tag]) =
+  if body.isNil: return
+  case body.kind
+  of nkObjectTy, nkTupleTy:
+    if body.len > 2:
+      collectFields(body[2], file, tags)
+  of nkRecList:
+    for child in body:
+      if child.kind == nkIdentDefs and child.len >= 2:
+        let fieldType = $child[^2]
+        for k in 0 ..< child.len - 2:
+          let fieldNode = child[k]
+          if fieldNode.kind == nkEmpty:
+            continue
+          let fieldName = nodeName(fieldNode)
+          if fieldName.len > 0:
+            addTag(tags, file, int(child.info.line), fieldName, tkVar,
+                   signature = if fieldType.len > 0: ": " & fieldType else: "",
+                   docComment = extractDocComment(child))
+      elif child.kind == nkRecCase:
+        if child.len > 0 and child[0].kind == nkIdentDefs:
+          let discNode = child[0]
+          for k in 0 ..< discNode.len - 2:
+            let fieldNode = discNode[k]
+            if fieldNode.kind == nkEmpty: continue
+            let fieldName = nodeName(fieldNode)
+            if fieldName.len > 0:
+              addTag(tags, file, int(discNode.info.line), fieldName, tkVar,
+                     signature = ": " & $discNode[^2],
+                     docComment = extractDocComment(discNode))
+        for b in 1 ..< child.len:
+          collectFields(child[b], file, tags)
+      elif child.kind == nkRecList:
+        collectFields(child, file, tags)
+  of nkOfBranch, nkElse:
+    if body.len > 0:
+      collectFields(body[body.len - 1], file, tags)
+  else:
+    discard
+
+proc collectTagsFromAst(n: PNode, file: string, tags: var seq[Tag],
     includePrivate: bool) =
   ## Walks the AST and collects tags for declarations we care about.
   case n.kind
@@ -149,42 +228,66 @@ proc collectTagsFromAst(n: PNode, file: string, tags: var seq[Tag],
   of nkProcDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkProc, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkProc, buildSignature(n), extractDocComment(n))
   of nkFuncDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkFunc, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkFunc, buildSignature(n), extractDocComment(n))
   of nkMethodDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkMethod, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkMethod, buildSignature(n), extractDocComment(n))
   of nkIteratorDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkIterator, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkIterator, buildSignature(n), extractDocComment(n))
   of nkMacroDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkMacro, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkMacro, buildSignature(n), extractDocComment(n))
   of nkTemplateDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkTemplate, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkTemplate, buildSignature(n), extractDocComment(n))
   of nkConverterDef:
     if includePrivate or isExportedName(n[namePos]):
       let name = nodeName(n[namePos])
-      addTag(tags, file, int(n.info.line), name, tkConverter, buildSignature(n))
+      addTag(tags, file, int(n.info.line), name, tkConverter, buildSignature(n), extractDocComment(n))
+  of nkTypeDef:
+    if n.len > 0:
+      let nameNode = n[0]
+      let name = nodeName(nameNode)
+      if name.len > 0 and (includePrivate or isExportedName(nameNode)):
+        addTag(tags, file, int(n.info.line), name, tkType, docComment = extractDocComment(n))
+      # Index object/record fields and enum members
+      if n.len > 2:
+        let typeBody = n[2]
+        if typeBody.kind == nkEnumTy:
+          for field in typeBody:
+            if field.kind == nkEmpty: continue
+            let fieldName = if field.kind == nkEnumFieldDef and field.len > 0:
+                                nodeName(field[0])
+                              else:
+                                nodeName(field)
+            if fieldName.len > 0:
+              addTag(tags, file, int(field.info.line), fieldName, tkConst,
+                     docComment = extractDocComment(field))
+        else:
+          collectFields(typeBody, file, tags)
   of nkTypeSection, nkVarSection, nkLetSection, nkConstSection:
     for i in 0 ..< n.len:
       if n[i].kind == nkCommentStmt:
         continue
       let def = n[i]
+      if def.kind == nkTypeDef:
+        collectTagsFromAst(def, file, tags, includePrivate)
+        continue
       let nameNode = def[0]
       if includePrivate or isExportedName(nameNode):
         let name = nodeName(nameNode)
         let kindOffset = ord(n.kind) - ord(nkTypeSection)
         let symKind = TagKind(ord(tkType) + kindOffset)
-        addTag(tags, file, int(def.info.line), name, symKind)
+        addTag(tags, file, int(def.info.line), name, symKind, docComment = extractDocComment(def))
   of nkStmtList:
     for i in 0 ..< n.len:
       collectTagsFromAst(n[i], file, tags, includePrivate)
@@ -202,10 +305,13 @@ proc parseNimFile(conf: ConfigRef, cache: IdentCache, file: string): PNode =
 
 proc collectTagsForFile*(conf: ConfigRef, cache: IdentCache, file: string,
     includePrivate = false): seq[Tag] =
-  let ast = parseNimFile(conf, cache, file)
-  if ast.isNil:
-    return
-  collectTagsFromAst(ast, file, result, includePrivate)
+  try:
+    let ast = parseNimFile(conf, cache, file)
+    if ast.isNil:
+      return
+    collectTagsFromAst(ast, file, result, includePrivate)
+  except CatchableError:
+    discard
 
 proc moduleNameFromPath(path: string): string =
   ## Derive the Nim module name from a file path by taking the last
@@ -259,6 +365,7 @@ proc generateCtagsForDir*(
     return
 
   var conf = newConfigRef()
+  conf.errorMax = high(int)
   let firstRootAbs = absolutePath(roots[0])
   let projectDir =
     if dirExists(firstRootAbs):

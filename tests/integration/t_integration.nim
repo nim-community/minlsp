@@ -301,8 +301,89 @@ block hover_object_creation:
       value: "proc test(): string"
     )
   )
-  
+
   doAssert hover.contents.kind == MarkupKind.Markdown
   doAssert hover.contents.value == "proc test(): string"
+
+# New integration tests for object fields and enum members
+
+block hover_on_object_field:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let hoverOpt = lsp.getHover("file://" & testFile, 12, 4)
+  doAssert hoverOpt.isSome
+  doAssert hoverOpt.get().contents.value.contains("string")
+
+block hover_on_enum_member:
+  let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let hoverOpt = lsp.getHover("file://" & testFile, 40, 4)
+  doAssert hoverOpt.isSome
+  doAssert hoverOpt.get().contents.value.contains("Active")
+
+block definition_on_object_field:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let content = readFile(testFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let defOpt = lsp.findDefinition("file://" & testFile, 12, 4)
+  doAssert defOpt.isSome
+  let loc = defOpt.get()
+  doAssert loc.range.startPos.line == 12
+
+block document_symbols_include_object_fields_and_enum_members:
+  let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+
+  let symbols = lsp.getDocumentSymbols("file://" & testFile)
+  var foundName = false
+  var foundActive = false
+  for s in symbols:
+    if s.name == "name":
+      foundName = true
+      doAssert s.kind == SymbolKind.Variable
+    if s.name == "Active":
+      foundActive = true
+      doAssert s.kind == SymbolKind.Constant
+
+  doAssert foundName
+  doAssert foundActive
+
+block signature_help_on_procedure_call:
+  let mainFile = testdataDir / "simple_project" / "src" / "main.nim"
+  let utilsFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let content = readFile(mainFile)
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(utilsFile)
+  lsp.updateFile("file://" & mainFile, content)
+
+  let sigOpt = lsp.getSignatureHelp("file://" & mainFile, 5, 12)
+  doAssert sigOpt.isSome
+  doAssert sigOpt.get().signatures[0].label.contains("greet")
+
+block workspace_symbol_search:
+  let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+
+  let symbols = lsp.getWorkspaceSymbols("Person")
+  doAssert symbols.len > 0
+  var found = false
+  for s in symbols:
+    if s.name == "Person":
+      found = true
+      break
+  doAssert found
 
 # Tests pass silently
