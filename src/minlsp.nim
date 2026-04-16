@@ -8,11 +8,13 @@ type
   MinLSP* = ref object
     ctagsCache*: Table[string, seq[Tag]]
     openFiles*: Table[string, string]
+    pendingUpdates: Table[string, int]
     rootPath*: string
     initialized*: bool
     shutdownRequested*: bool
     conf: ConfigRef
     cache: IdentCache
+    tagIndex: Table[string, seq[Tag]]   # maps tag.name -> all tags with that name
 
   Position* = object
     line*: int
@@ -129,12 +131,22 @@ proc initMinLSP*(): MinLSP =
   result = MinLSP(
     ctagsCache: initTable[string, seq[Tag]](),
     openFiles: initTable[string, string](),
+    pendingUpdates: initTable[string, int](),
     rootPath: "",
     initialized: false,
     shutdownRequested: false,
     conf: conf,
-    cache: newIdentCache()
+    cache: newIdentCache(),
+    tagIndex: initTable[string, seq[Tag]]()
   )
+
+proc rebuildTagIndex(lsp: MinLSP) =
+  lsp.tagIndex.clear()
+  for filePath, tags in lsp.ctagsCache:
+    for tag in tags:
+      if not lsp.tagIndex.hasKey(tag.name):
+        lsp.tagIndex[tag.name] = @[]
+      lsp.tagIndex[tag.name].add(tag)
 
 proc generateCtagsForFile*(lsp: MinLSP, filePath: string): seq[Tag] =
   if lsp.ctagsCache.hasKey(filePath):
@@ -143,16 +155,30 @@ proc generateCtagsForFile*(lsp: MinLSP, filePath: string): seq[Tag] =
   try:
     result = collectTagsForFile(lsp.conf, lsp.cache, filePath, includePrivate = true)
     lsp.ctagsCache[filePath] = result
+    lsp.rebuildTagIndex()
     infoLog("Generated ", $result.len, " tags for ", filePath)
   except:
     errorLog("Failed to generate ctags for ", filePath, ": ", getCurrentExceptionMsg())
     result = @[]
 
+proc extractLine(content: string, line: int): string =
+  ## Extract a single line from `content` without splitting the whole file.
+  var currLine = 0
+  var i = 0
+  let n = content.len
+  while i < n and currLine < line:
+    if content[i] == '\n':
+      inc(currLine)
+    inc(i)
+  var start = i
+  while i < n and content[i] != '\n':
+    inc(i)
+  result = content[start ..< i]
+
 proc extractWordAtPosition(content: string, line, character: int): tuple[word: string, lineStart, colStart, lineEnd, colEnd: int] =
-  let lines = content.splitLines
-  if line >= lines.len:
+  let currentLine = extractLine(content, line)
+  if currentLine.len == 0 and (line > 0 or content.len == 0):
     return ("", 0, 0, 0, 0)
-  let currentLine = lines[line]
   if character >= currentLine.len:
     return ("", 0, 0, 0, 0)
   var start = character
@@ -180,24 +206,45 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): O
   var bestDistance = high(int)
   let defKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}
 
-  if lsp.ctagsCache.hasKey(filePath):
-    for tag in lsp.ctagsCache[filePath]:
-      if tag.name == word and tag.kind in defKinds:
+  let candidates = lsp.tagIndex.getOrDefault(word)
+  if candidates.len > 0:
+    for tag in candidates:
+      if tag.kind notin defKinds:
+        continue
+      if tag.file == filePath:
         let distance = abs((tag.line - 1) - line)
         if distance < bestDistance:
           bestDistance = distance
           bestTag = some(tag)
-
-  if bestTag.isNone:
-    for file, tags in lsp.ctagsCache:
-      if file == filePath:
-        continue
-      for tag in tags:
-        if tag.name == word and tag.kind in defKinds:
+    if bestTag.isNone:
+      bestDistance = high(int)
+      for tag in candidates:
+        if tag.kind notin defKinds:
+          continue
+        let distance = abs((tag.line - 1) - line)
+        if distance < bestDistance:
+          bestDistance = distance
           bestTag = some(tag)
+  else:
+    # Fallback to old behavior
+    if lsp.ctagsCache.hasKey(filePath):
+      for tag in lsp.ctagsCache[filePath]:
+        if tag.name == word and tag.kind in defKinds:
+          let distance = abs((tag.line - 1) - line)
+          if distance < bestDistance:
+            bestDistance = distance
+            bestTag = some(tag)
+
+    if bestTag.isNone:
+      for file, tags in lsp.ctagsCache:
+        if file == filePath:
+          continue
+        for tag in tags:
+          if tag.name == word and tag.kind in defKinds:
+            bestTag = some(tag)
+            break
+        if bestTag.isSome:
           break
-      if bestTag.isSome:
-        break
 
   if bestTag.isSome:
     let tag = bestTag.get()
@@ -212,30 +259,17 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): O
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
   let filePath = uriToPath(fileUri)
-  var symbols: seq[CompletionItem]
-  
+  let content = lsp.openFiles.getOrDefault(filePath, "")
+  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
+
+  const maxResults = 100
+  var seen = initHashSet[string]()
+  result = @[]
+
   if lsp.ctagsCache.hasKey(filePath):
     for tag in lsp.ctagsCache[filePath]:
-      let kind = case tag.kind
-      of tkProc, tkFunc: CompletionItemKind.Function
-      of tkMethod: CompletionItemKind.Method
-      of tkType: CompletionItemKind.Class
-      of tkVar: CompletionItemKind.Variable
-      of tkLet, tkConst: CompletionItemKind.Value
-      of tkMacro: CompletionItemKind.Function
-      of tkTemplate: CompletionItemKind.Snippet
-      else: CompletionItemKind.Text
-      
-      symbols.add(CompletionItem(
-        label: tag.name,
-        kind: kind,
-        detail: tag.signature,
-        documentation: ""
-      ))
-  
-  for file, tags in lsp.ctagsCache:
-    if file != filePath:
-      for tag in tags:
+      if tag.name.startsWith(word) and not seen.contains(tag.name):
+        seen.incl(tag.name)
         let kind = case tag.kind
         of tkProc, tkFunc: CompletionItemKind.Function
         of tkMethod: CompletionItemKind.Method
@@ -245,15 +279,38 @@ proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): s
         of tkMacro: CompletionItemKind.Function
         of tkTemplate: CompletionItemKind.Snippet
         else: CompletionItemKind.Text
-        
-        symbols.add(CompletionItem(
+        result.add(CompletionItem(
           label: tag.name,
           kind: kind,
           detail: tag.signature,
           documentation: ""
         ))
-  
-  return symbols
+      if result.len >= maxResults:
+        return
+
+  for file, tags in lsp.ctagsCache:
+    if file == filePath:
+      continue
+    for tag in tags:
+      if tag.name.startsWith(word) and not seen.contains(tag.name):
+        seen.incl(tag.name)
+        let kind = case tag.kind
+        of tkProc, tkFunc: CompletionItemKind.Function
+        of tkMethod: CompletionItemKind.Method
+        of tkType: CompletionItemKind.Class
+        of tkVar: CompletionItemKind.Variable
+        of tkLet, tkConst: CompletionItemKind.Value
+        of tkMacro: CompletionItemKind.Function
+        of tkTemplate: CompletionItemKind.Snippet
+        else: CompletionItemKind.Text
+        result.add(CompletionItem(
+          label: tag.name,
+          kind: kind,
+          detail: tag.signature,
+          documentation: ""
+        ))
+      if result.len >= maxResults:
+        return
 
 proc buildHoverText(tag: Tag): string =
   let kindStr = tagKindName(tag.kind)
@@ -275,24 +332,41 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
   var bestTag: Option[Tag]
   var bestDistance = high(int)
 
-  if lsp.ctagsCache.hasKey(filePath):
-    for tag in lsp.ctagsCache[filePath]:
-      if tag.name == word:
+  let candidates = lsp.tagIndex.getOrDefault(word)
+  if candidates.len > 0:
+    for tag in candidates:
+      if tag.file == filePath:
         let distance = abs((tag.line - 1) - line)
         if distance < bestDistance:
           bestDistance = distance
           bestTag = some(tag)
-
-  if bestTag.isNone:
-    for file, tags in lsp.ctagsCache:
-      if file == filePath:
-        continue
-      for tag in tags:
-        if tag.name == word:
+    if bestTag.isNone:
+      bestDistance = high(int)
+      for tag in candidates:
+        let distance = abs((tag.line - 1) - line)
+        if distance < bestDistance:
+          bestDistance = distance
           bestTag = some(tag)
+  else:
+    # Fallback to old behavior
+    if lsp.ctagsCache.hasKey(filePath):
+      for tag in lsp.ctagsCache[filePath]:
+        if tag.name == word:
+          let distance = abs((tag.line - 1) - line)
+          if distance < bestDistance:
+            bestDistance = distance
+            bestTag = some(tag)
+
+    if bestTag.isNone:
+      for file, tags in lsp.ctagsCache:
+        if file == filePath:
+          continue
+        for tag in tags:
+          if tag.name == word:
+            bestTag = some(tag)
+            break
+        if bestTag.isSome:
           break
-      if bestTag.isSome:
-        break
 
   if bestTag.isSome:
     return some(Hover(
@@ -306,10 +380,9 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
 proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[SignatureHelp] =
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
-  let lines = content.splitLines
-  if line >= lines.len:
+  let currentLine = extractLine(content, line)
+  if currentLine.len == 0 and (line > 0 or content.len == 0):
     return none(SignatureHelp)
-  let currentLine = lines[line]
   # Find the word before the opening paren at or before character
   var pos = min(character, currentLine.len - 1)
   if pos < 0: return none(SignatureHelp)
@@ -351,24 +424,45 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
   var bestDistance = high(int)
   let sigKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkConverter, tkIterator}
 
-  if lsp.ctagsCache.hasKey(filePath):
-    for tag in lsp.ctagsCache[filePath]:
-      if tag.name == word and tag.kind in sigKinds:
+  let candidates = lsp.tagIndex.getOrDefault(word)
+  if candidates.len > 0:
+    for tag in candidates:
+      if tag.kind notin sigKinds:
+        continue
+      if tag.file == filePath:
         let distance = abs((tag.line - 1) - line)
         if distance < bestDistance:
           bestDistance = distance
           bestTag = some(tag)
-
-  if bestTag.isNone:
-    for file, tags in lsp.ctagsCache:
-      if file == filePath:
-        continue
-      for tag in tags:
-        if tag.name == word and tag.kind in sigKinds:
+    if bestTag.isNone:
+      bestDistance = high(int)
+      for tag in candidates:
+        if tag.kind notin sigKinds:
+          continue
+        let distance = abs((tag.line - 1) - line)
+        if distance < bestDistance:
+          bestDistance = distance
           bestTag = some(tag)
+  else:
+    # Fallback to old behavior
+    if lsp.ctagsCache.hasKey(filePath):
+      for tag in lsp.ctagsCache[filePath]:
+        if tag.name == word and tag.kind in sigKinds:
+          let distance = abs((tag.line - 1) - line)
+          if distance < bestDistance:
+            bestDistance = distance
+            bestTag = some(tag)
+
+    if bestTag.isNone:
+      for file, tags in lsp.ctagsCache:
+        if file == filePath:
+          continue
+        for tag in tags:
+          if tag.name == word and tag.kind in sigKinds:
+            bestTag = some(tag)
+            break
+        if bestTag.isSome:
           break
-      if bestTag.isSome:
-        break
 
   if bestTag.isSome:
     let tag = bestTag.get()
@@ -396,6 +490,24 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
     ))
   return none(SignatureHelp)
 
+proc scanWordOccurrences(text, word: string): seq[tuple[line, col: int]] =
+  var pos = 0
+  var line = 0
+  var lineStart = 0
+  while true:
+    let idx = text.find(word, pos)
+    if idx == -1:
+      break
+    for i in pos ..< idx:
+      if text[i] == '\n':
+        inc line
+        lineStart = i + 1
+    let leftOk = idx == 0 or text[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+    let rightOk = idx + word.len >= text.len or text[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+    if leftOk and rightOk:
+      result.add((line: line, col: idx - lineStart))
+    pos = idx + word.len
+
 proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, includeDeclaration: bool): seq[Location] =
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
@@ -410,47 +522,27 @@ proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, inc
       if lsp.openFiles.hasKey(path): lsp.openFiles[path] else: readFile(path)
     except CatchableError:
       continue
-    let lines = text.splitLines
-    for i, ln in lines:
-      var col = 0
-      while col < ln.len:
-        let idx = ln.find(word, col)
-        if idx == -1:
-          break
-        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        if leftOk and rightOk:
-          result.add(Location(
-            uri: pathToUri(path),
-            range: Range(
-              startPos: Position(line: i, character: idx),
-              endPos: Position(line: i, character: idx + word.len)
-            )
-          ))
-        col = idx + word.len
+    for occ in scanWordOccurrences(text, word):
+      result.add(Location(
+        uri: pathToUri(path),
+        range: Range(
+          startPos: Position(line: occ.line, character: occ.col),
+          endPos: Position(line: occ.line, character: occ.col + word.len)
+        )
+      ))
   # Also search open files that might not be in ctagsCache yet
   for path in lsp.openFiles.keys:
     if path in processed:
       continue
     let text = lsp.openFiles[path]
-    let lines = text.splitLines
-    for i, ln in lines:
-      var col = 0
-      while col < ln.len:
-        let idx = ln.find(word, col)
-        if idx == -1:
-          break
-        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        if leftOk and rightOk:
-          result.add(Location(
-            uri: pathToUri(path),
-            range: Range(
-              startPos: Position(line: i, character: idx),
-              endPos: Position(line: i, character: idx + word.len)
-            )
-          ))
-        col = idx + word.len
+    for occ in scanWordOccurrences(text, word):
+      result.add(Location(
+        uri: pathToUri(path),
+        range: Range(
+          startPos: Position(line: occ.line, character: occ.col),
+          endPos: Position(line: occ.line, character: occ.col + word.len)
+        )
+      ))
 
 proc getWorkspaceSymbols*(lsp: MinLSP, query: string): seq[DocumentSymbol] =
   if query.len == 0:
@@ -491,16 +583,13 @@ proc getDiagnostics*(lsp: MinLSP, fileUri: string): seq[tuple[message: string, l
     return
   let content = lsp.openFiles[filePath]
   # Simple syntax check: try to parse with the compiler
-  var conf = newConfigRef()
-  conf.errorMax = high(int)
-  var cache = newIdentCache()
   let abs = AbsoluteFile(absolutePath(filePath))
-  let idx = fileInfoIdx(conf, abs)
+  let idx = fileInfoIdx(lsp.conf, abs)
   # We can't easily intercept compiler messages, but we can check for nil AST
   # and also do a basic brace/paren balance check
   var ast: PNode = nil
   try:
-    ast = syntaxes.parseFile(idx, cache, conf)
+    ast = syntaxes.parseFile(idx, lsp.cache, lsp.conf)
   except CatchableError:
     discard
   # Also run nimpretty --check if available? Too expensive.
@@ -543,34 +632,15 @@ proc renameSymbol*(lsp: MinLSP, fileUri: string, line: int, character: int, newN
       if lsp.openFiles.hasKey(path): lsp.openFiles[path] else: readFile(path)
     except CatchableError:
       continue
-    let lines = text.splitLines
-    for i, ln in lines:
-      var col = 0
-      while col < ln.len:
-        let idx = ln.find(word, col)
-        if idx == -1:
-          break
-        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        if leftOk and rightOk:
-          result.add((uri: pathToUri(path), startLine: i, startCol: idx, endLine: i, endCol: idx + word.len))
-        col = idx + word.len
+    for occ in scanWordOccurrences(text, word):
+      result.add((uri: pathToUri(path), startLine: occ.line, startCol: occ.col, endLine: occ.line, endCol: occ.col + word.len))
   # Also include open files that might not be in ctagsCache yet
   for path in lsp.openFiles.keys:
     if path in processed:
       continue
-    let lines = lsp.openFiles[path].splitLines
-    for i, ln in lines:
-      var col = 0
-      while col < ln.len:
-        let idx = ln.find(word, col)
-        if idx == -1:
-          break
-        let leftOk = idx == 0 or ln[idx-1] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        let rightOk = idx + word.len >= ln.len or ln[idx + word.len] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-        if leftOk and rightOk:
-          result.add((uri: pathToUri(path), startLine: i, startCol: idx, endLine: i, endCol: idx + word.len))
-        col = idx + word.len
+    let text = lsp.openFiles[path]
+    for occ in scanWordOccurrences(text, word):
+      result.add((uri: pathToUri(path), startLine: occ.line, startCol: occ.col, endLine: occ.line, endCol: occ.col + word.len))
 
 proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
   let filePath = uriToPath(fileUri)
@@ -604,15 +674,28 @@ proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
         uri: fileUri
       ))
 
-proc updateFile*(lsp: MinLSP, fileUri: string, content: string) =
+proc debouncedGenerateCtags(lsp: MinLSP, filePath: string, expectedTick: int) {.async.} =
+  await sleepAsync(300)
+  if lsp.pendingUpdates.getOrDefault(filePath, 0) == expectedTick:
+    lsp.pendingUpdates.del(filePath)
+    discard lsp.generateCtagsForFile(filePath)
+
+proc updateFile*(lsp: MinLSP, fileUri: string, content: string, immediate: bool = false) =
   let filePath = uriToPath(fileUri)
   lsp.openFiles[filePath] = content
-  discard lsp.generateCtagsForFile(filePath)
+  if immediate:
+    lsp.pendingUpdates.del(filePath)
+    discard lsp.generateCtagsForFile(filePath)
+  else:
+    let tick = lsp.pendingUpdates.getOrDefault(filePath, 0) + 1
+    lsp.pendingUpdates[filePath] = tick
+    asyncCheck lsp.debouncedGenerateCtags(filePath, tick)
 
 proc removeFile*(lsp: MinLSP, fileUri: string) =
   let filePath = uriToPath(fileUri)
   lsp.openFiles.del(filePath)
   lsp.ctagsCache.del(filePath)
+  lsp.pendingUpdates.del(filePath)
 
 # LSP Protocol - using baseprotocol from nimlsp
 
@@ -621,6 +704,17 @@ var lspInstance: MinLSP
 
 proc initLSP() =
   lspInstance = initMinLSP()
+
+proc scanProjectAsync(lsp: MinLSP) {.async.} =
+  if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
+    infoLog("Scanning project...")
+    let tags = generateCtagsForDir([lsp.rootPath], excludes = ["deps", "tests"], includePrivate = true)
+    for tag in tags:
+      if not lsp.ctagsCache.hasKey(tag.file):
+        lsp.ctagsCache[tag.file] = @[]
+      lsp.ctagsCache[tag.file].add(tag)
+    lsp.rebuildTagIndex()
+    infoLog("Scanned project, found ", $tags.len, " tags")
 
 proc handleInitialize(lsp: MinLSP, params: JsonNode): JsonNode =
   # Extract root path from initialize params
@@ -633,16 +727,6 @@ proc handleInitialize(lsp: MinLSP, params: JsonNode): JsonNode =
     lsp.rootPath = rootUri
   
   infoLog("Project root: ", lsp.rootPath)
-  
-  # Scan project for tags
-  if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
-    infoLog("Scanning project...")
-    let tags = generateCtagsForDir([lsp.rootPath], excludes = ["deps", "tests"], includePrivate = true)
-    for tag in tags:
-      if not lsp.ctagsCache.hasKey(tag.file):
-        lsp.ctagsCache[tag.file] = @[]
-      lsp.ctagsCache[tag.file].add(tag)
-    infoLog("Scanned project, found ", $tags.len, " tags")
   
   lsp.initialized = true
   
@@ -691,7 +775,7 @@ proc handleTextDocumentDidOpen(lsp: MinLSP, params: JsonNode) =
   let textDocument = params["textDocument"]
   let uri = textDocument["uri"].getStr
   let text = textDocument["text"].getStr
-  lsp.updateFile(uri, text)
+  lsp.updateFile(uri, text, immediate = true)
 
 proc handleTextDocumentDidChange(lsp: MinLSP, params: JsonNode) =
   let textDocument = params["textDocument"]
@@ -984,6 +1068,7 @@ proc handleMessage(lsp: MinLSP, message: LSPMessage, outs: AsyncFile) {.async.} 
   of "initialize":
     debugLog("Processing initialize request...")
     result = handleInitialize(lsp, params)
+    asyncCheck scanProjectAsync(lsp)
     debugLog("Initialize handled")
   
   of "shutdown":
