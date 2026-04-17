@@ -202,57 +202,29 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): s
   let defKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}
   let candidates = lsp.tagIndex.getOrDefault(word)
 
-  if candidates.len > 0:
-    # 1. Exact line match in same file -> return that single precise definition
-    for tag in candidates:
-      if tag.kind notin defKinds:
-        continue
-      if tag.file == filePath and (tag.line - 1) == line:
-        return @[Location(
-          uri: pathToUri(tag.file),
-          range: Range(
-            startPos: Position(line: tag.line - 1, character: 0),
-            endPos: Position(line: tag.line - 1, character: 0)
-          )
-        )]
-
-    # 2. Return all definition overloads so the client can choose
-    for tag in candidates:
-      if tag.kind notin defKinds:
-        continue
-      result.add(Location(
+  # Only use the name index; no fallback string-matching scans
+  for tag in candidates:
+    if tag.kind notin defKinds:
+      continue
+    if tag.file == filePath and (tag.line - 1) == line:
+      return @[Location(
         uri: pathToUri(tag.file),
         range: Range(
           startPos: Position(line: tag.line - 1, character: 0),
           endPos: Position(line: tag.line - 1, character: 0)
         )
-      ))
-  else:
-    # Fallback: return all matching tags without guessing
-    if lsp.ctagsCache.hasKey(filePath):
-      for tag in lsp.ctagsCache[filePath]:
-        if tag.name == word and tag.kind in defKinds:
-          result.add(Location(
-            uri: pathToUri(tag.file),
-            range: Range(
-              startPos: Position(line: tag.line - 1, character: 0),
-              endPos: Position(line: tag.line - 1, character: 0)
-            )
-          ))
+      )]
 
-    if result.len == 0:
-      for file, tags in lsp.ctagsCache:
-        if file == filePath:
-          continue
-        for tag in tags:
-          if tag.name == word and tag.kind in defKinds:
-            result.add(Location(
-              uri: pathToUri(tag.file),
-              range: Range(
-                startPos: Position(line: tag.line - 1, character: 0),
-                endPos: Position(line: tag.line - 1, character: 0)
-              )
-            ))
+  for tag in candidates:
+    if tag.kind notin defKinds:
+      continue
+    result.add(Location(
+      uri: pathToUri(tag.file),
+      range: Range(
+        startPos: Position(line: tag.line - 1, character: 0),
+        endPos: Position(line: tag.line - 1, character: 0)
+      )
+    ))
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
   let filePath = uriToPath(fileUri)
@@ -328,31 +300,12 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
 
   var matches: seq[Tag] = @[]
   let candidates = lsp.tagIndex.getOrDefault(word)
-  if candidates.len > 0:
-    # Exact definition line in same file -> return precise match
+  for tag in candidates:
+    if tag.file == filePath and (tag.line - 1) == line:
+      matches.add(tag)
+  if matches.len == 0:
     for tag in candidates:
-      if tag.file == filePath and (tag.line - 1) == line:
-        matches.add(tag)
-    if matches.len == 0:
-      # Call site: return all candidates so we don't guess
-      for tag in candidates:
-        matches.add(tag)
-  else:
-    # Fallback to old behavior
-    if lsp.ctagsCache.hasKey(filePath):
-      for tag in lsp.ctagsCache[filePath]:
-        if tag.name == word:
-          matches.add(tag)
-    if matches.len == 0:
-      for file, tags in lsp.ctagsCache:
-        if file == filePath:
-          continue
-        for tag in tags:
-          if tag.name == word:
-            matches.add(tag)
-            break
-        if matches.len > 0:
-          break
+      matches.add(tag)
 
   if matches.len == 0:
     return none(Hover)
@@ -423,33 +376,16 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
   var matches: seq[Tag] = @[]
 
   let candidates = lsp.tagIndex.getOrDefault(word)
-  if candidates.len > 0:
+  for tag in candidates:
+    if tag.kind notin sigKinds:
+      continue
+    if tag.file == filePath and (tag.line - 1) == line:
+      matches.add(tag)
+  if matches.len == 0:
     for tag in candidates:
       if tag.kind notin sigKinds:
         continue
-      if tag.file == filePath and (tag.line - 1) == line:
-        matches.add(tag)
-    if matches.len == 0:
-      for tag in candidates:
-        if tag.kind notin sigKinds:
-          continue
-        matches.add(tag)
-  else:
-    # Fallback to old behavior
-    if lsp.ctagsCache.hasKey(filePath):
-      for tag in lsp.ctagsCache[filePath]:
-        if tag.name == word and tag.kind in sigKinds:
-          matches.add(tag)
-    if matches.len == 0:
-      for file, tags in lsp.ctagsCache:
-        if file == filePath:
-          continue
-        for tag in tags:
-          if tag.name == word and tag.kind in sigKinds:
-            matches.add(tag)
-            break
-        if matches.len > 0:
-          break
+      matches.add(tag)
 
   if matches.len == 0:
     return none(SignatureHelp)
