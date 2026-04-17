@@ -1,4 +1,4 @@
-import std/[os, strutils, algorithm, parseopt, osproc]
+import std/[os, strutils, algorithm, parseopt, osproc, threadpool]
 
 import compiler/[ast, syntaxes, options, idents, msgs, pathutils, renderer]
 
@@ -348,6 +348,15 @@ proc sanitizeTagFieldValue(s: string): string =
       result.add ch
       lastWasSpace = (ch == ' ')
 
+proc collectTagsStandalone(file: string, includePrivate: bool, projectDir: string): seq[Tag] {.gcsafe.} =
+  ## Parse a single file in a standalone context so it can run in parallel.
+  {.gcsafe.}:
+    var conf = newConfigRef()
+    conf.errorMax = high(int)
+    conf.projectPath = AbsoluteDir(projectDir)
+    var cache = newIdentCache()
+    result = collectTagsForFile(conf, cache, file, includePrivate)
+
 proc generateCtagsForDir*(
     roots: openArray[string],
     excludes: openArray[string],
@@ -364,8 +373,6 @@ proc generateCtagsForDir*(
   if roots.len == 0:
     return
 
-  var conf = newConfigRef()
-  conf.errorMax = high(int)
   let firstRootAbs = absolutePath(roots[0])
   let projectDir =
     if dirExists(firstRootAbs):
@@ -374,12 +381,11 @@ proc generateCtagsForDir*(
       parentDir(firstRootAbs)
     else:
       getCurrentDir()
-  conf.projectPath = AbsoluteDir(projectDir)
-  var cache = newIdentCache()
 
   let effectiveBaseDir = if baseDir.len == 0: getCurrentDir() else: baseDir
 
   var tags: seq[Tag] = @[]
+  var tasks: seq[FlowVar[seq[Tag]]] = @[]
 
   for root in roots:
     let absRoot = absolutePath(root)
@@ -401,7 +407,7 @@ proc generateCtagsForDir*(
         let moduleName = moduleNameFromPath(path)
         addTag(tags, path, 1, moduleName, tkModule)
         if not modulesOnly:
-          tags.add collectTagsForFile(conf, cache, path, includePrivate)
+          tasks.add spawn collectTagsStandalone(path, includePrivate, projectDir)
     elif fileExists(absRoot):
       # Allow roots to be explicit Nim files in addition to
       # directories; in that case, process just the file itself.
@@ -420,7 +426,10 @@ proc generateCtagsForDir*(
       let moduleName = moduleNameFromPath(absRoot)
       addTag(tags, absRoot, 1, moduleName, tkModule)
       if not modulesOnly:
-        tags.add collectTagsForFile(conf, cache, absRoot, includePrivate)
+        tasks.add spawn collectTagsStandalone(absRoot, includePrivate, projectDir)
+
+  for t in tasks:
+    tags.add(^t)
 
   if tagRelative:
     for tag in tags.mitems:
