@@ -228,37 +228,31 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): s
         )
       ))
   else:
-    # Fallback to old behavior: nearest tag in same file, then any tag in other files
-    var bestTag: Option[Tag]
-    var bestDistance = high(int)
+    # Fallback: return all matching tags without guessing
     if lsp.ctagsCache.hasKey(filePath):
       for tag in lsp.ctagsCache[filePath]:
         if tag.name == word and tag.kind in defKinds:
-          let distance = abs((tag.line - 1) - line)
-          if distance < bestDistance:
-            bestDistance = distance
-            bestTag = some(tag)
+          result.add(Location(
+            uri: pathToUri(tag.file),
+            range: Range(
+              startPos: Position(line: tag.line - 1, character: 0),
+              endPos: Position(line: tag.line - 1, character: 0)
+            )
+          ))
 
-    if bestTag.isNone:
+    if result.len == 0:
       for file, tags in lsp.ctagsCache:
         if file == filePath:
           continue
         for tag in tags:
           if tag.name == word and tag.kind in defKinds:
-            bestTag = some(tag)
-            break
-        if bestTag.isSome:
-          break
-
-    if bestTag.isSome:
-      let tag = bestTag.get()
-      result.add(Location(
-        uri: pathToUri(tag.file),
-        range: Range(
-          startPos: Position(line: tag.line - 1, character: 0),
-          endPos: Position(line: tag.line - 1, character: 0)
-        )
-      ))
+            result.add(Location(
+              uri: pathToUri(tag.file),
+              range: Range(
+                startPos: Position(line: tag.line - 1, character: 0),
+                endPos: Position(line: tag.line - 1, character: 0)
+              )
+            ))
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
   let filePath = uriToPath(fileUri)
