@@ -149,9 +149,6 @@ proc rebuildTagIndex(lsp: MinLSP) =
       lsp.tagIndex[tag.name].add(tag)
 
 proc generateCtagsForFile*(lsp: MinLSP, filePath: string): seq[Tag] =
-  if lsp.ctagsCache.hasKey(filePath):
-    return lsp.ctagsCache[filePath]
-  
   try:
     result = collectTagsForFile(lsp.conf, lsp.cache, filePath, includePrivate = true)
     lsp.ctagsCache[filePath] = result
@@ -195,38 +192,45 @@ proc extractWordAtPosition(content: string, line, character: int): tuple[word: s
   result.lineEnd = line
   result.colEnd = wordEnd
 
-proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[Location] =
+proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[Location] =
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
   if word.len == 0:
-    return none(Location)
+    return @[]
 
-  var bestTag: Option[Tag]
-  var bestDistance = high(int)
   let defKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}
-
   let candidates = lsp.tagIndex.getOrDefault(word)
+
   if candidates.len > 0:
+    # 1. Exact line match in same file -> return that single precise definition
     for tag in candidates:
       if tag.kind notin defKinds:
         continue
-      if tag.file == filePath:
-        let distance = abs((tag.line - 1) - line)
-        if distance < bestDistance:
-          bestDistance = distance
-          bestTag = some(tag)
-    if bestTag.isNone:
-      bestDistance = high(int)
-      for tag in candidates:
-        if tag.kind notin defKinds:
-          continue
-        let distance = abs((tag.line - 1) - line)
-        if distance < bestDistance:
-          bestDistance = distance
-          bestTag = some(tag)
+      if tag.file == filePath and (tag.line - 1) == line:
+        return @[Location(
+          uri: pathToUri(tag.file),
+          range: Range(
+            startPos: Position(line: tag.line - 1, character: 0),
+            endPos: Position(line: tag.line - 1, character: 0)
+          )
+        )]
+
+    # 2. Return all definition overloads so the client can choose
+    for tag in candidates:
+      if tag.kind notin defKinds:
+        continue
+      result.add(Location(
+        uri: pathToUri(tag.file),
+        range: Range(
+          startPos: Position(line: tag.line - 1, character: 0),
+          endPos: Position(line: tag.line - 1, character: 0)
+        )
+      ))
   else:
-    # Fallback to old behavior
+    # Fallback to old behavior: nearest tag in same file, then any tag in other files
+    var bestTag: Option[Tag]
+    var bestDistance = high(int)
     if lsp.ctagsCache.hasKey(filePath):
       for tag in lsp.ctagsCache[filePath]:
         if tag.name == word and tag.kind in defKinds:
@@ -246,16 +250,15 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): O
         if bestTag.isSome:
           break
 
-  if bestTag.isSome:
-    let tag = bestTag.get()
-    return some(Location(
-      uri: pathToUri(tag.file),
-      range: Range(
-        startPos: Position(line: tag.line - 1, character: 0),
-        endPos: Position(line: tag.line - 1, character: 0)
-      )
-    ))
-  return none(Location)
+    if bestTag.isSome:
+      let tag = bestTag.get()
+      result.add(Location(
+        uri: pathToUri(tag.file),
+        range: Range(
+          startPos: Position(line: tag.line - 1, character: 0),
+          endPos: Position(line: tag.line - 1, character: 0)
+        )
+      ))
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
   let filePath = uriToPath(fileUri)
@@ -836,11 +839,13 @@ proc handleTextDocumentDefinition(lsp: MinLSP, params: JsonNode): JsonNode =
   let position = params["position"]
   let line = position["line"].getInt
   let character = position["character"].getInt
-  
-  let definitionOpt = lsp.findDefinition(uri, line, character)
-  
-  if definitionOpt.isSome:
-    let definition = definitionOpt.get()
+
+  let definitions = lsp.findDefinition(uri, line, character)
+
+  if definitions.len == 0:
+    result = newJNull()
+  elif definitions.len == 1:
+    let definition = definitions[0]
     result = %*{
       "uri": definition.uri,
       "range": {
@@ -855,7 +860,21 @@ proc handleTextDocumentDefinition(lsp: MinLSP, params: JsonNode): JsonNode =
       }
     }
   else:
-    result = newJNull()
+    result = newJArray()
+    for definition in definitions:
+      result.add(%*{
+        "uri": definition.uri,
+        "range": {
+          "start": {
+            "line": definition.range.startPos.line,
+            "character": definition.range.startPos.character
+          },
+          "end": {
+            "line": definition.range.endPos.line,
+            "character": definition.range.endPos.character
+          }
+        }
+      })
 
 proc handleTextDocumentSignatureHelp(lsp: MinLSP, params: JsonNode): JsonNode =
   let textDocument = params["textDocument"]

@@ -233,9 +233,9 @@ block find_definition_returns_location:
   # Try to find definition of "greet" proc (line 2: "proc greet*(name: string): string =")
   # Looking for "greet" at column 6 (0-indexed: after "proc ")
   let defLocation = lsp.findDefinition("file://" & testFile, 2, 6)
-  
-  doAssert defLocation.isSome
-  let loc = defLocation.get()
+
+  doAssert defLocation.len > 0
+  let loc = defLocation[0]
   doAssert loc.uri == "file://" & testFile
 
 cleanupTempFiles()
@@ -248,7 +248,7 @@ block find_definition_returns_none_for_unknown_word:
   
   # Looking for a word that doesn't exist
   let defLocation = lsp.findDefinition("file://" & testFile, 0, 500)
-  doAssert not defLocation.isSome
+  doAssert defLocation.len == 0
 
 block find_definition_returns_none_for_out_of_bounds_line:
   let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
@@ -257,7 +257,7 @@ block find_definition_returns_none_for_out_of_bounds_line:
   lsp.updateFile("file://" & testFile, content)
   
   let defLocation = lsp.findDefinition("file://" & testFile, 1000, 0)
-  doAssert not defLocation.isSome
+  doAssert defLocation.len == 0
 
 # MinLSP Hover Tests (use sample projects)
 
@@ -312,12 +312,12 @@ block find_definition_prefers_closest_overload:
   lsp.updateFile("file://" & testFile, content)
   
   let def1 = lsp.findDefinition("file://" & testFile, 0, 6)
-  doAssert def1.isSome
-  doAssert def1.get().range.startPos.line == 0
-  
+  doAssert def1.len == 1
+  doAssert def1[0].range.startPos.line == 0
+
   let def2 = lsp.findDefinition("file://" & testFile, 3, 6)
-  doAssert def2.isSome
-  doAssert def2.get().range.startPos.line == 3
+  doAssert def2.len == 1
+  doAssert def2[0].range.startPos.line == 3
 
 cleanupTempFiles()
 
@@ -437,8 +437,8 @@ block find_definition_returns_location_for_object_field:
   lsp.updateFile("file://" & testFile, content)
 
   let defLocation = lsp.findDefinition("file://" & testFile, 12, 4)
-  doAssert defLocation.isSome
-  let loc = defLocation.get()
+  doAssert defLocation.len > 0
+  let loc = defLocation[0]
   doAssert loc.uri == "file://" & testFile
 
 block find_definition_returns_location_for_enum_member:
@@ -449,8 +449,8 @@ block find_definition_returns_location_for_enum_member:
   lsp.updateFile("file://" & testFile, content)
 
   let defLocation = lsp.findDefinition("file://" & testFile, 40, 4)
-  doAssert defLocation.isSome
-  let loc = defLocation.get()
+  doAssert defLocation.len > 0
+  let loc = defLocation[0]
   doAssert loc.uri == "file://" & testFile
 
 # New LSP capability tests

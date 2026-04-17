@@ -156,9 +156,9 @@ block definition_search_across_all_cached_files:
   
   # Try to find definition of "User" from services.nim
   let defLocation = lsp.findDefinition("file://" & servicesFile, 4, 20)
-  
-  if defLocation.isSome:
-    let loc = defLocation.get()
+
+  if defLocation.len > 0:
+    let loc = defLocation[0]
     doAssert loc.uri == "file://" & modelsFile
 
 block shutdown_and_exit_flags:
@@ -337,8 +337,8 @@ block definition_on_object_field:
   lsp.updateFile("file://" & testFile, content)
 
   let defOpt = lsp.findDefinition("file://" & testFile, 12, 4)
-  doAssert defOpt.isSome
-  let loc = defOpt.get()
+  doAssert defOpt.len > 0
+  let loc = defOpt[0]
   doAssert loc.range.startPos.line == 12
 
 block document_symbols_include_object_fields_and_enum_members:
