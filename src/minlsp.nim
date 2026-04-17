@@ -332,53 +332,55 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
   if word.len == 0:
     return none(Hover)
 
-  var bestTag: Option[Tag]
-  var bestDistance = high(int)
-
+  var matches: seq[Tag] = @[]
   let candidates = lsp.tagIndex.getOrDefault(word)
   if candidates.len > 0:
+    # Exact definition line in same file -> return precise match
     for tag in candidates:
-      if tag.file == filePath:
-        let distance = abs((tag.line - 1) - line)
-        if distance < bestDistance:
-          bestDistance = distance
-          bestTag = some(tag)
-    if bestTag.isNone:
-      bestDistance = high(int)
+      if tag.file == filePath and (tag.line - 1) == line:
+        matches.add(tag)
+    if matches.len == 0:
+      # Call site: return all candidates so we don't guess
       for tag in candidates:
-        let distance = abs((tag.line - 1) - line)
-        if distance < bestDistance:
-          bestDistance = distance
-          bestTag = some(tag)
+        matches.add(tag)
   else:
     # Fallback to old behavior
     if lsp.ctagsCache.hasKey(filePath):
       for tag in lsp.ctagsCache[filePath]:
         if tag.name == word:
-          let distance = abs((tag.line - 1) - line)
-          if distance < bestDistance:
-            bestDistance = distance
-            bestTag = some(tag)
-
-    if bestTag.isNone:
+          matches.add(tag)
+    if matches.len == 0:
       for file, tags in lsp.ctagsCache:
         if file == filePath:
           continue
         for tag in tags:
           if tag.name == word:
-            bestTag = some(tag)
+            matches.add(tag)
             break
-        if bestTag.isSome:
+        if matches.len > 0:
           break
 
-  if bestTag.isSome:
+  if matches.len == 0:
+    return none(Hover)
+  elif matches.len == 1:
     return some(Hover(
       contents: MarkupContent(
         kind: MarkupKind.Markdown,
-        value: buildHoverText(bestTag.get())
+        value: buildHoverText(matches[0])
       )
     ))
-  return none(Hover)
+  else:
+    var text = ""
+    for i, tag in matches:
+      text.add(buildHoverText(tag))
+      if i < matches.high:
+        text.add("\n\n---\n\n")
+    return some(Hover(
+      contents: MarkupContent(
+        kind: MarkupKind.Markdown,
+        value: text
+      )
+    ))
 
 proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[SignatureHelp] =
   let filePath = uriToPath(fileUri)
@@ -423,52 +425,43 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
     return none(SignatureHelp)
   let word = currentLine[start..pos]
 
-  var bestTag: Option[Tag]
-  var bestDistance = high(int)
   let sigKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkConverter, tkIterator}
+  var matches: seq[Tag] = @[]
 
   let candidates = lsp.tagIndex.getOrDefault(word)
   if candidates.len > 0:
     for tag in candidates:
       if tag.kind notin sigKinds:
         continue
-      if tag.file == filePath:
-        let distance = abs((tag.line - 1) - line)
-        if distance < bestDistance:
-          bestDistance = distance
-          bestTag = some(tag)
-    if bestTag.isNone:
-      bestDistance = high(int)
+      if tag.file == filePath and (tag.line - 1) == line:
+        matches.add(tag)
+    if matches.len == 0:
       for tag in candidates:
         if tag.kind notin sigKinds:
           continue
-        let distance = abs((tag.line - 1) - line)
-        if distance < bestDistance:
-          bestDistance = distance
-          bestTag = some(tag)
+        matches.add(tag)
   else:
     # Fallback to old behavior
     if lsp.ctagsCache.hasKey(filePath):
       for tag in lsp.ctagsCache[filePath]:
         if tag.name == word and tag.kind in sigKinds:
-          let distance = abs((tag.line - 1) - line)
-          if distance < bestDistance:
-            bestDistance = distance
-            bestTag = some(tag)
-
-    if bestTag.isNone:
+          matches.add(tag)
+    if matches.len == 0:
       for file, tags in lsp.ctagsCache:
         if file == filePath:
           continue
         for tag in tags:
           if tag.name == word and tag.kind in sigKinds:
-            bestTag = some(tag)
+            matches.add(tag)
             break
-        if bestTag.isSome:
+        if matches.len > 0:
           break
 
-  if bestTag.isSome:
-    let tag = bestTag.get()
+  if matches.len == 0:
+    return none(SignatureHelp)
+
+  var signatures: seq[SignatureInformation] = @[]
+  for tag in matches:
     var label = tag.name
     if tag.signature.len > 0:
       label = tag.name & tag.signature
@@ -482,16 +475,17 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
         let p = raw.strip()
         if p.len > 0:
           params.add(ParameterInformation(label: p, documentation: ""))
-    return some(SignatureHelp(
-      signatures: @[SignatureInformation(
-        label: label,
-        documentation: tag.docComment,
-        parameters: params
-      )],
-      activeSignature: 0,
-      activeParameter: 0
+    signatures.add(SignatureInformation(
+      label: label,
+      documentation: tag.docComment,
+      parameters: params
     ))
-  return none(SignatureHelp)
+
+  return some(SignatureHelp(
+    signatures: signatures,
+    activeSignature: 0,
+    activeParameter: 0
+  ))
 
 proc scanWordOccurrences(text, word: string): seq[tuple[line, col: int]] =
   var pos = 0

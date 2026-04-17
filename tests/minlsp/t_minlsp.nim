@@ -285,18 +285,18 @@ block get_hover_returns_none_for_unknown_word:
   let hoverOpt = lsp.getHover("file://" & testFile, 0, 500)
   doAssert not hoverOpt.isSome
 
-block get_hover_prefers_closest_overload:
+block get_hover_returns_exact_definition_on_definition_line:
   let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n")
   let lsp = initMinLSP()
   discard lsp.generateCtagsForFile(testFile)
   let content = readFile(testFile)
   lsp.updateFile("file://" & testFile, content)
-  
+
   let hover1 = lsp.getHover("file://" & testFile, 0, 6)
   doAssert hover1.isSome
   doAssert hover1.get().contents.value.contains("foo(x: int): int")
   doAssert not hover1.get().contents.value.contains("foo(x: string): string")
-  
+
   let hover2 = lsp.getHover("file://" & testFile, 3, 6)
   doAssert hover2.isSome
   doAssert hover2.get().contents.value.contains("foo(x: string): string")
@@ -304,13 +304,27 @@ block get_hover_prefers_closest_overload:
 
 cleanupTempFiles()
 
-block find_definition_prefers_closest_overload:
+block get_hover_returns_all_overloads_at_call_site:
+  let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n\nproc bar(): int =\n  foo(1)\n")
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  let content = readFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  let hover = lsp.getHover("file://" & testFile, 7, 2)
+  doAssert hover.isSome
+  doAssert hover.get().contents.value.contains("foo(x: int): int")
+  doAssert hover.get().contents.value.contains("foo(x: string): string")
+
+cleanupTempFiles()
+
+block find_definition_returns_exact_definition_on_definition_line:
   let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n")
   let lsp = initMinLSP()
   discard lsp.generateCtagsForFile(testFile)
   let content = readFile(testFile)
   lsp.updateFile("file://" & testFile, content)
-  
+
   let def1 = lsp.findDefinition("file://" & testFile, 0, 6)
   doAssert def1.len == 1
   doAssert def1[0].range.startPos.line == 0
@@ -469,6 +483,28 @@ block get_signature_help_returns_signature_info:
   let sig = sigOpt.get()
   doAssert sig.signatures.len > 0
   doAssert sig.signatures[0].label.contains("greet")
+
+block get_signature_help_returns_all_overloads:
+  let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n\nproc bar(): int =\n  foo(1)\n")
+  let lsp = initMinLSP()
+  discard lsp.generateCtagsForFile(testFile)
+  let content = readFile(testFile)
+  lsp.updateFile("file://" & testFile, content)
+
+  # Signature help inside foo(1) call at line 7, col 6 (the opening paren)
+  let sigOpt = lsp.getSignatureHelp("file://" & testFile, 7, 6)
+  doAssert sigOpt.isSome
+  let sig = sigOpt.get()
+  doAssert sig.signatures.len == 2
+  var foundInt = false
+  var foundString = false
+  for s in sig.signatures:
+    if s.label.contains("int"): foundInt = true
+    if s.label.contains("string"): foundString = true
+  doAssert foundInt
+  doAssert foundString
+
+cleanupTempFiles()
 
 block get_references_returns_locations:
   let testFile = testdataDir / "simple_project" / "src" / "main.nim"
