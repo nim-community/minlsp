@@ -1,6 +1,6 @@
 import std/[os, strutils, algorithm, parseopt, osproc, threadpool]
 
-import compiler/[ast, syntaxes, options, idents, msgs, pathutils, renderer]
+import compiler/[ast, syntaxes, options, idents, msgs, pathutils, renderer, lineinfos]
 
 type
   TagKind* = enum
@@ -354,6 +354,8 @@ proc collectTagsStandalone(file: string, includePrivate: bool, projectDir: strin
     var conf = newConfigRef()
     conf.errorMax = high(int)
     conf.projectPath = AbsoluteDir(projectDir)
+    conf.setNote(warnLongLiterals, false)
+    conf.setNote(warnInconsistentSpacing, false)
     var cache = newIdentCache()
     result = collectTagsForFile(conf, cache, file, includePrivate)
 
@@ -481,7 +483,7 @@ proc queryNimSettingSeq(setting: string): seq[string] =
       setting & "): echo x"
   try:
     let output = execProcess("nim",
-                             args = ["--verbosity:0", "--eval:" & evalCode],
+                             args = ["--verbosity:0", "--warnings:off", "--eval:" & evalCode],
                              options = {poStdErrToStdOut, poUsePath})
     for line in output.splitLines:
       let trimmed = line.strip()

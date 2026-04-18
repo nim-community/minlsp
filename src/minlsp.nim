@@ -612,7 +612,7 @@ var lspInstance: MinLSP
 proc initLSP() =
   lspInstance = initMinLSP()
 
-proc scanProjectAsync(lsp: MinLSP) {.async.} =
+proc scanProjectAsync*(lsp: MinLSP) {.async.} =
   if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
     infoLog("Scanning project...")
     let tags = generateCtagsForDir([lsp.rootPath], excludes = ["deps", "tests"], includePrivate = true)
