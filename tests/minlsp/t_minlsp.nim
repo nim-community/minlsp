@@ -304,7 +304,7 @@ block get_hover_returns_exact_definition_on_definition_line:
 
 cleanupTempFiles()
 
-block get_hover_returns_all_overloads_at_call_site:
+block get_hover_returns_none_at_call_site:
   let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n\nproc bar(): int =\n  foo(1)\n")
   let lsp = initMinLSP()
   discard lsp.generateCtagsForFile(testFile)
@@ -312,9 +312,7 @@ block get_hover_returns_all_overloads_at_call_site:
   lsp.updateFile("file://" & testFile, content)
 
   let hover = lsp.getHover("file://" & testFile, 7, 2)
-  doAssert hover.isSome
-  doAssert hover.get().contents.value.contains("foo(x: int): int")
-  doAssert hover.get().contents.value.contains("foo(x: string): string")
+  doAssert hover.isNone
 
 cleanupTempFiles()
 
@@ -469,7 +467,7 @@ block find_definition_returns_location_for_enum_member:
 
 # New LSP capability tests
 
-block get_signature_help_returns_signature_info:
+block get_signature_help_returns_none_at_call_site_cross_file:
   let testFile = testdataDir / "simple_project" / "src" / "main.nim"
   let content = readFile(testFile)
   let lsp = initMinLSP()
@@ -478,13 +476,11 @@ block get_signature_help_returns_signature_info:
   lsp.updateFile("file://" & testFile, content)
 
   # Signature help on "greet(" at line 5, col 12 (the opening paren)
+  # Returns none because the cursor is at a call site, not the definition line
   let sigOpt = lsp.getSignatureHelp("file://" & testFile, 5, 12)
-  doAssert sigOpt.isSome
-  let sig = sigOpt.get()
-  doAssert sig.signatures.len > 0
-  doAssert sig.signatures[0].label.contains("greet")
+  doAssert sigOpt.isNone
 
-block get_signature_help_returns_all_overloads:
+block get_signature_help_returns_none_at_call_site:
   let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n\nproc bar(): int =\n  foo(1)\n")
   let lsp = initMinLSP()
   discard lsp.generateCtagsForFile(testFile)
@@ -493,16 +489,7 @@ block get_signature_help_returns_all_overloads:
 
   # Signature help inside foo(1) call at line 7, col 6 (the opening paren)
   let sigOpt = lsp.getSignatureHelp("file://" & testFile, 7, 6)
-  doAssert sigOpt.isSome
-  let sig = sigOpt.get()
-  doAssert sig.signatures.len == 2
-  var foundInt = false
-  var foundString = false
-  for s in sig.signatures:
-    if s.label.contains("int"): foundInt = true
-    if s.label.contains("string"): foundString = true
-  doAssert foundInt
-  doAssert foundString
+  doAssert sigOpt.isNone
 
 cleanupTempFiles()
 

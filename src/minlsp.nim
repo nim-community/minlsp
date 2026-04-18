@@ -202,7 +202,8 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): s
   let defKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkType, tkVar, tkLet, tkConst}
   let candidates = lsp.tagIndex.getOrDefault(word)
 
-  # Only use the name index; no fallback string-matching scans
+  # Only return a result when the cursor is on the definition line itself.
+  # Without semantic analysis we cannot disambiguate overloads at call sites.
   for tag in candidates:
     if tag.kind notin defKinds:
       continue
@@ -214,17 +215,6 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): s
           endPos: Position(line: tag.line - 1, character: 0)
         )
       )]
-
-  for tag in candidates:
-    if tag.kind notin defKinds:
-      continue
-    result.add(Location(
-      uri: pathToUri(tag.file),
-      range: Range(
-        startPos: Position(line: tag.line - 1, character: 0),
-        endPos: Position(line: tag.line - 1, character: 0)
-      )
-    ))
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
   let filePath = uriToPath(fileUri)
@@ -304,10 +294,6 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
     if tag.file == filePath and (tag.line - 1) == line:
       matches.add(tag)
   if matches.len == 0:
-    for tag in candidates:
-      matches.add(tag)
-
-  if matches.len == 0:
     return none(Hover)
   elif matches.len == 1:
     return some(Hover(
@@ -381,12 +367,6 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
       continue
     if tag.file == filePath and (tag.line - 1) == line:
       matches.add(tag)
-  if matches.len == 0:
-    for tag in candidates:
-      if tag.kind notin sigKinds:
-        continue
-      matches.add(tag)
-
   if matches.len == 0:
     return none(SignatureHelp)
 

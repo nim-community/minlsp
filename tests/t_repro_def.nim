@@ -84,6 +84,6 @@ echo "findDefinition(10,2)=", fmtDef(d10)
 # Assertions:
 doAssert d0.len == 1 and d0[0].range.startPos.line == 0, "definition on line 0 should return itself"
 doAssert d3.len == 1 and d3[0].range.startPos.line == 3, "definition on line 3 should return itself"
-doAssert d7.len == 2, "call site should return both overloads"
-doAssert d10.len == 2, "call site should return both overloads"
+doAssert d7.len == 0, "call site should not return ambiguous overloads"
+doAssert d10.len == 0, "call site should not return ambiguous overloads"
 echo "All assertions passed!"
