@@ -513,7 +513,7 @@ proc nimblePaths(): seq[string] =
   for p in queryNimSettingSeq("nimblePaths"):
     result.addRootIfDir(p)
 
-proc searchPaths(): seq[string] =
+proc searchPaths*(): seq[string] =
   for p in queryNimSettingSeq("searchPaths"):
     result.addRootIfDir(p)
 

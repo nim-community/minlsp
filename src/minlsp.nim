@@ -623,6 +623,25 @@ proc scanProjectAsync(lsp: MinLSP) {.async.} =
     lsp.rebuildTagIndex()
     infoLog("Scanned project, found ", $tags.len, " tags")
 
+    infoLog("Scanning standard library...")
+    var stdRoots: seq[string]
+    for pth in searchPaths():
+      if pth.len == 0 or not dirExists(pth):
+        continue
+      # Skip dependency directories to avoid indexing installed packages as stdlib
+      if pth.endsWith("nimble") or pth.contains("/deps/") or pth.contains("\\deps\\"):
+        continue
+      stdRoots.add(pth)
+    if stdRoots.len > 0:
+      let stdTags = generateCtagsForDir(stdRoots, excludes = ["deps", "tests"],
+                                          includePrivate = true)
+      for tag in stdTags:
+        if not lsp.ctagsCache.hasKey(tag.file):
+          lsp.ctagsCache[tag.file] = @[]
+        lsp.ctagsCache[tag.file].add(tag)
+      lsp.rebuildTagIndex()
+      infoLog("Scanned stdlib, found ", $stdTags.len, " tags")
+
 proc handleInitialize(lsp: MinLSP, params: JsonNode): JsonNode =
   # Extract root path from initialize params
   if params.hasKey("rootPath") and params["rootPath"].kind != JNull:
