@@ -368,9 +368,9 @@ block signature_help_on_procedure_call:
   discard lsp.generateCtagsForFile(utilsFile)
   lsp.updateFile("file://" & mainFile, content)
 
-  # Signature help at a call site returns none when we cannot disambiguate
   let sigOpt = lsp.getSignatureHelp("file://" & mainFile, 5, 12)
-  doAssert sigOpt.isNone
+  doAssert sigOpt.isSome
+  doAssert sigOpt.get().signatures[0].label.contains("greet")
 
 block workspace_symbol_search:
   let testFile = testdataDir / "simple_project" / "src" / "utils.nim"

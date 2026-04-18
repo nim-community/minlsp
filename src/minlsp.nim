@@ -294,6 +294,10 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
     if tag.file == filePath and (tag.line - 1) == line:
       matches.add(tag)
   if matches.len == 0:
+    for tag in candidates:
+      matches.add(tag)
+
+  if matches.len == 0:
     return none(Hover)
   elif matches.len == 1:
     return some(Hover(
@@ -367,6 +371,12 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
       continue
     if tag.file == filePath and (tag.line - 1) == line:
       matches.add(tag)
+  if matches.len == 0:
+    for tag in candidates:
+      if tag.kind notin sigKinds:
+        continue
+      matches.add(tag)
+
   if matches.len == 0:
     return none(SignatureHelp)
 
