@@ -138,8 +138,8 @@ block hover_content_includes_signature:
   
   if hoverOpt.isSome:
     let hover = hoverOpt.get()
-    doAssert hover.contents.kind == MarkupKind.Markdown
-    doAssert hover.contents.value.contains("greet")
+    doAssert hover.contents.len > 0
+    doAssert hover.contents[0].contains("greet")
 
 block definition_search_across_all_cached_files:
   let lsp = initMinLSP()
@@ -295,15 +295,9 @@ block document_symbol_creation:
   doAssert sym.range.endPos.line == 5
 
 block hover_object_creation:
-  let hover = Hover(
-  contents: MarkupContent(
-      kind: MarkupKind.Markdown,
-      value: "proc test(): string"
-    )
-  )
+  let hover = Hover(contents: @["proc test(): string"])
 
-  doAssert hover.contents.kind == MarkupKind.Markdown
-  doAssert hover.contents.value == "proc test(): string"
+  doAssert hover.contents[0] == "proc test(): string"
 
 # New integration tests for object fields and enum members
 
@@ -316,7 +310,7 @@ block hover_on_object_field:
 
   let hoverOpt = lsp.getHover("file://" & testFile, 12, 4)
   doAssert hoverOpt.isSome
-  doAssert hoverOpt.get().contents.value.contains("string")
+  doAssert hoverOpt.get().contents[0].contains("string")
 
 block hover_on_enum_member:
   let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
@@ -327,7 +321,7 @@ block hover_on_enum_member:
 
   let hoverOpt = lsp.getHover("file://" & testFile, 40, 4)
   doAssert hoverOpt.isSome
-  doAssert hoverOpt.get().contents.value.contains("Active")
+  doAssert hoverOpt.get().contents[0].contains("Active")
 
 block definition_on_object_field:
   let testFile = testdataDir / "simple_project" / "src" / "utils.nim"

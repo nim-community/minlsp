@@ -273,7 +273,8 @@ block get_hover_returns_hover_info:
   
   doAssert hoverOpt.isSome
   let hover = hoverOpt.get()
-  doAssert hover.contents.value.contains("greet")
+  doAssert hover.contents.len > 0
+  doAssert hover.contents[0].contains("greet")
 
 block get_hover_returns_none_for_unknown_word:
   let testFile = testdataDir / "simple_project" / "src" / "utils.nim"
@@ -294,8 +295,9 @@ block get_hover_returns_all_overloads:
 
   let hover1 = lsp.getHover("file://" & testFile, 0, 6)
   doAssert hover1.isSome
-  doAssert hover1.get().contents.value.contains("foo(x: int): int")
-  doAssert hover1.get().contents.value.contains("foo(x: string): string")
+  let hover1Text = hover1.get().contents.join("")
+  doAssert hover1Text.contains("foo(x: int): int")
+  doAssert hover1Text.contains("foo(x: string): string")
 
 cleanupTempFiles()
 
@@ -308,8 +310,9 @@ block get_hover_returns_all_overloads_at_call_site:
 
   let hover = lsp.getHover("file://" & testFile, 7, 2)
   doAssert hover.isSome
-  doAssert hover.get().contents.value.contains("foo(x: int): int")
-  doAssert hover.get().contents.value.contains("foo(x: string): string")
+  let hoverText = hover.get().contents.join("")
+  doAssert hoverText.contains("foo(x: int): int")
+  doAssert hoverText.contains("foo(x: string): string")
 
 cleanupTempFiles()
 
@@ -423,7 +426,8 @@ block get_hover_returns_hover_info_for_object_field:
   let hoverOpt = lsp.getHover("file://" & testFile, 12, 4)
   doAssert hoverOpt.isSome
   let hover = hoverOpt.get()
-  doAssert hover.contents.value.contains("name")
+  doAssert hover.contents.len > 0
+  doAssert hover.contents[0].contains("name")
 
 block get_hover_returns_hover_info_for_enum_member:
   let testFile = testdataDir / "language_constructs" / "src" / "all_constructs.nim"
@@ -436,7 +440,8 @@ block get_hover_returns_hover_info_for_enum_member:
   let hoverOpt = lsp.getHover("file://" & testFile, 40, 4)
   doAssert hoverOpt.isSome
   let hover = hoverOpt.get()
-  doAssert hover.contents.value.contains("Active")
+  doAssert hover.contents.len > 0
+  doAssert hover.contents[0].contains("Active")
 
 block find_definition_returns_location_for_object_field:
   let testFile = testdataDir / "simple_project" / "src" / "utils.nim"

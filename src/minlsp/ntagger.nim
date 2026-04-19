@@ -16,6 +16,7 @@ type
     kind*: TagKind
     signature*: string
     docComment*: string
+    normName*: string
 
 proc tagKindName*(k: TagKind): string =
   case k
@@ -72,7 +73,7 @@ proc addTag(tags: var seq[Tag], file: string, line: int, name: string, k: TagKin
   if name.len == 0:
     return
   tags.add Tag(name: name, file: file, line: line, kind: k,
-      signature: signature, docComment: docComment)
+      signature: signature, docComment: docComment, normName: nimIdentNormalize(name))
 
 proc nodeName(n: PNode): string =
   ## Extracts the plain identifier name for a symbol definition node.
@@ -483,7 +484,7 @@ proc queryNimSettingSeq(setting: string): seq[string] =
       setting & "): echo x"
   try:
     let output = execProcess("nim",
-                             args = ["--verbosity:0", "--warnings:off", "--eval:" & evalCode],
+                             args = ["--verbosity:0", "--warnings:off", "--hints:off", "--eval:" & evalCode],
                              options = {poStdErrToStdOut, poUsePath})
     for line in output.splitLines:
       let trimmed = line.strip()
@@ -494,30 +495,164 @@ proc queryNimSettingSeq(setting: string): seq[string] =
     # empty list and continue without the extra paths.
     discard
 
+proc queryNimSetting(setting: string): string =
+  ## Invoke the Nim compiler to query a single-value setting such as
+  ## `libpath`, returning the value as a string.
+  let evalCode =
+    "import std/compilesettings; echo querySetting(" & setting & ")"
+  try:
+    let output = execProcess("nim",
+                             args = ["--verbosity:0", "--warnings:off", "--hints:off", "--eval:" & evalCode],
+                             options = {poStdErrToStdOut, poUsePath})
+    result = output.strip()
+  except CatchableError:
+    discard
+
 proc addRootIfDir(roots: var seq[string], path: string) =
   ## Add `path` to `roots` if it is a directory and not already
-  ## present in the list.
+  ## present in the list. Paths are normalized to absolute form
+  ## before deduplication.
   let p = path.strip()
   if p.len == 0 or not dirExists(p):
     return
+  let absP = absolutePath(p)
   for existing in roots:
-    if existing == p:
+    if absolutePath(existing) == absP:
       return
-  roots.add(p)
+  roots.add(absP)
 
-proc nimCfgPaths(): seq[string] =
-  if fileExists("nim.cfg"):
-    for line in readLines("nim.cfg"):
-      if line.startsWith("--path:"):
-        result.addRootIfDir(line[7..^1])
+proc nimCfgPaths*(projectDir: string): seq[string] =
+  ## Read `nim.cfg` and `config.nims` from `projectDir` and extract
+  ## `--path:` (or `-p:`) entries, resolving relative paths against
+  ## `projectDir`.
+  if projectDir.len == 0 or not dirExists(projectDir):
+    return
+  for configName in ["nim.cfg", "config.nims"]:
+    let configPath = projectDir / configName
+    if not fileExists(configPath):
+      continue
+    for line in readFile(configPath).splitLines:
+      var trimmed = line.strip()
+      if trimmed.startsWith("#"):
+        continue
+      var pathVal = ""
+      if trimmed.startsWith("--path:"):
+        pathVal = trimmed[7..^1]
+      elif trimmed.startsWith("-p:"):
+        pathVal = trimmed[3..^1]
+      else:
+        continue
+      pathVal = pathVal.strip()
+      if pathVal.len >= 2 and pathVal[0] == '"' and pathVal[^1] == '"':
+        pathVal = pathVal[1..^2]
+      if pathVal.len == 0:
+        continue
+      let resolvedPath = if isAbsolute(pathVal): pathVal else: projectDir / pathVal
+      result.addRootIfDir(resolvedPath)
 
-proc nimblePaths(): seq[string] =
+proc nimblePaths*(): seq[string] =
   for p in queryNimSettingSeq("nimblePaths"):
     result.addRootIfDir(p)
 
 proc searchPaths*(): seq[string] =
   for p in queryNimSettingSeq("searchPaths"):
     result.addRootIfDir(p)
+
+proc stdlibPath*(): string =
+  ## Query the Nim compiler for the standard library path.
+  result = queryNimSetting("libpath")
+  if result.len > 0 and not dirExists(result):
+    result = ""
+
+proc isStdlibPath*(path: string): bool =
+  ## Check whether `path` is a Nim standard library directory by
+  ## looking for `system.nim` or the `std` subdirectory.
+  let p = path.strip()
+  if p.len == 0 or not dirExists(p):
+    return false
+  return fileExists(p / "system.nim") or dirExists(p / "std")
+
+proc parseNimbleRequires*(nimblePath: string): seq[string] =
+  ## Parse a `.nimble` file and extract the package names from
+  ## `requires` statements.
+  if not fileExists(nimblePath):
+    return
+  for line in readFile(nimblePath).splitLines:
+    let trimmed = line.strip()
+    if not trimmed.startsWith("requires"):
+      continue
+    var i = 8  # skip "requires"
+    while i < trimmed.len:
+      while i < trimmed.len and trimmed[i] != '"':
+        inc i
+      if i >= trimmed.len:
+        break
+      inc i  # skip opening quote
+      let start = i
+      while i < trimmed.len and trimmed[i] != '"':
+        inc i
+      if i >= trimmed.len:
+        break
+      let depSpec = trimmed[start..<i]
+      let depName = depSpec.split({' ', '\t'})[0]
+      if depName.len > 0:
+        result.add(depName)
+      inc i  # skip closing quote
+
+proc resolveNimbleDep*(pkgName: string, nimblePaths: seq[string]): string =
+  ## Find the installation directory of a Nimble package by name.
+  if pkgName.len == 0:
+    return ""
+  for basePath in nimblePaths:
+    if not dirExists(basePath):
+      continue
+    for kind, path in walkDir(basePath):
+      if kind == pcDir:
+        let dirName = splitFile(path).name
+        if dirName.startsWith(pkgName & "-") or dirName == pkgName:
+          return path
+  return ""
+
+proc discoverScanRoots*(projectRoot: string,
+    extraPkgPaths: seq[string] = @[]): tuple[
+    projectRoots: seq[string],
+    stdlibRoots: seq[string],
+    depRoots: seq[string]
+  ] =
+  ## Discover the three scan scopes for a project:
+  ## 1. Project source (root + nim.cfg paths)
+  ## 2. Nim standard library
+  ## 3. Dependencies declared in the project's `.nimble` file
+  ##
+  ## `extraPkgPaths` can be used to override or supplement the nimble
+  ## package paths used for dependency resolution (useful for testing).
+  if projectRoot.len > 0 and dirExists(projectRoot):
+    result.projectRoots.addRootIfDir(projectRoot)
+    for p in nimCfgPaths(projectRoot):
+      result.projectRoots.addRootIfDir(p)
+
+  let lib = stdlibPath()
+  if lib.len > 0:
+    result.stdlibRoots.addRootIfDir(lib)
+  else:
+    # Fallback: filter searchPaths for stdlib markers
+    for pth in searchPaths():
+      if isStdlibPath(pth):
+        result.stdlibRoots.addRootIfDir(pth)
+
+  if projectRoot.len > 0 and dirExists(projectRoot):
+    var nimbleFile = ""
+    for kind, path in walkDir(projectRoot):
+      if kind == pcFile and path.endsWith(".nimble"):
+        nimbleFile = path
+        break
+    if nimbleFile.len > 0:
+      let deps = parseNimbleRequires(nimbleFile)
+      let pkgPaths = if extraPkgPaths.len > 0: extraPkgPaths else: nimblePaths()
+      for dep in deps:
+        let depPath = resolveNimbleDep(dep, pkgPaths)
+        if depPath.len > 0:
+          result.depRoots.addRootIfDir(depPath)
 
 proc main() =
   ## Simple CLI for ntagger.
@@ -664,10 +799,16 @@ proc main() =
     rootsToScan.add(roots)
 
   if autoMode:
-    # Query Nim for its search paths and Nimble package paths and
-    # include those directories as additional roots.
-    rootsToScan.add(nimCfgPaths())
-    rootsToScan.add(nimblePaths())
+    # Discover the three scan scopes (project, stdlib, deps) from
+    # the first root (or current directory) and add them.
+    let projectDir = if roots.len > 0: roots[0] else: getCurrentDir()
+    let (projRoots, stdRoots, depRoots) = discoverScanRoots(projectDir)
+    for r in projRoots:
+      rootsToScan.addRootIfDir(r)
+    for r in depRoots:
+      rootsToScan.addRootIfDir(r)
+    for r in stdRoots:
+      rootsToScan.addRootIfDir(r)
 
     # In auto mode, default the output file to `tags` unless the
     # user has explicitly provided a different `-f`/`--output`.

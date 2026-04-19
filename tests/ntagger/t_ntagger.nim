@@ -463,4 +463,78 @@ block collect_tags_includes_variant_object_fields:
   doAssert foundValue
   doAssert foundError
 
+# Search path helper tests
+
+block nim_cfg_paths_reads_project_dir:
+  let testDir = getTempDir() / "minlsp_nimcfg_test"
+  createDir(testDir)
+  createDir(testDir / "src")
+  writeFile(testDir / "nim.cfg", "--path:src\n")
+  let paths = nimCfgPaths(testDir)
+  doAssert paths.len == 1, "expected 1 path, got " & $paths.len
+  doAssert paths[0] == absolutePath(testDir / "src")
+  removeDir(testDir)
+
+block nim_cfg_paths_resolves_quotes:
+  let testDir = getTempDir() / "minlsp_nimcfg_test2"
+  createDir(testDir)
+  createDir(testDir / "vendor")
+  writeFile(testDir / "nim.cfg", "--path:\"vendor\"\n")
+  let paths = nimCfgPaths(testDir)
+  doAssert paths.len == 1
+  doAssert paths[0] == absolutePath(testDir / "vendor")
+  removeDir(testDir)
+
+block parse_nimble_requires_extracts_names:
+  let testDir = getTempDir() / "minlsp_nimble_test"
+  createDir(testDir)
+  let nimbleFile = testDir / "testproject.nimble"
+  writeFile(nimbleFile, "version = \"0.1.0\"\nrequires \"jsony >= 1.0.0\"\nrequires \"httpx\"\n")
+  let deps = parseNimbleRequires(nimbleFile)
+  doAssert deps.len == 2, "expected 2 deps, got " & $deps.len
+  doAssert deps[0] == "jsony"
+  doAssert deps[1] == "httpx"
+  removeDir(testDir)
+
+block resolve_nimble_dep_finds_package:
+  let testDir = getTempDir() / "minlsp_nimblepkgs_test"
+  createDir(testDir)
+  createDir(testDir / "jsony-1.1.0")
+  let found = resolveNimbleDep("jsony", @[testDir])
+  doAssert found.len > 0, "should find jsony package"
+  doAssert found.endsWith("jsony-1.1.0")
+  removeDir(testDir)
+
+block is_stdlib_path_false_for_random_dir:
+  let testDir = getTempDir() / "minlsp_notstdlib"
+  createDir(testDir)
+  doAssert not isStdlibPath(testDir)
+  removeDir(testDir)
+
+block discover_scan_roots_3_scopes:
+  let testDir = getTempDir() / "minlsp_discover_test"
+  let fakeNimbleDir = getTempDir() / "minlsp_fake_nimble"
+  createDir(testDir)
+  createDir(testDir / "src")
+  createDir(fakeNimbleDir / "jsony-1.0.0")
+  writeFile(testDir / "myproject.nimble", "requires \"jsony\"\n")
+  writeFile(testDir / "nim.cfg", "--path:src\n")
+
+  let (projRoots, stdRoots, depRoots) = discoverScanRoots(testDir, extraPkgPaths = @[fakeNimbleDir])
+
+  # Project scope should include root and nim.cfg paths
+  doAssert projRoots.len >= 1
+  doAssert absolutePath(testDir) in projRoots
+
+  # Dependency scope should include resolved nimble package
+  doAssert depRoots.len >= 1
+  var foundJsony = false
+  for r in depRoots:
+    if r.endsWith("jsony-1.0.0"):
+      foundJsony = true
+  doAssert foundJsony, "should find jsony in depRoots"
+
+  removeDir(testDir)
+  removeDir(fakeNimbleDir)
+
 # Tests pass silently

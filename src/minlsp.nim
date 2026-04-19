@@ -37,7 +37,7 @@ type
     value*: string
 
   Hover* = object
-    contents*: MarkupContent
+    contents*: seq[string]
 
   CompletionItemKind* = enum
     Text = 1
@@ -144,7 +144,7 @@ proc rebuildTagIndex(lsp: MinLSP) =
   lsp.tagIndex.clear()
   for filePath, tags in lsp.ctagsCache:
     for tag in tags:
-      let normName = nimIdentNormalize(tag.name)
+      let normName = tag.normName
       if not lsp.tagIndex.hasKey(normName):
         lsp.tagIndex[normName] = @[]
       lsp.tagIndex[normName].add(tag)
@@ -217,6 +217,29 @@ proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): s
         )
       )]
 
+proc tagToCompletionKind(k: TagKind): CompletionItemKind =
+  case k
+  of tkProc, tkFunc: CompletionItemKind.Function
+  of tkMethod: CompletionItemKind.Method
+  of tkType: CompletionItemKind.Class
+  of tkVar: CompletionItemKind.Variable
+  of tkLet, tkConst: CompletionItemKind.Value
+  of tkMacro: CompletionItemKind.Function
+  of tkTemplate: CompletionItemKind.Snippet
+  else: CompletionItemKind.Text
+
+proc maybeAddCompletion(word: string, tag: Tag, seen: var HashSet[string], results: var seq[CompletionItem], maxResults: int): bool =
+  if tag.name.startsWith(word) and not seen.contains(tag.name):
+    seen.incl(tag.name)
+    results.add(CompletionItem(
+      label: tag.name,
+      kind: tagToCompletionKind(tag.kind),
+      detail: tag.signature,
+      documentation: ""
+    ))
+    return results.len >= maxResults
+  return false
+
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
@@ -224,63 +247,40 @@ proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): s
 
   const maxResults = 100
   var seen = initHashSet[string]()
-  result = @[]
+  result = newSeqOfCap[CompletionItem](maxResults)
 
   if lsp.ctagsCache.hasKey(filePath):
     for tag in lsp.ctagsCache[filePath]:
-      if tag.name.startsWith(word) and not seen.contains(tag.name):
-        seen.incl(tag.name)
-        let kind = case tag.kind
-        of tkProc, tkFunc: CompletionItemKind.Function
-        of tkMethod: CompletionItemKind.Method
-        of tkType: CompletionItemKind.Class
-        of tkVar: CompletionItemKind.Variable
-        of tkLet, tkConst: CompletionItemKind.Value
-        of tkMacro: CompletionItemKind.Function
-        of tkTemplate: CompletionItemKind.Snippet
-        else: CompletionItemKind.Text
-        result.add(CompletionItem(
-          label: tag.name,
-          kind: kind,
-          detail: tag.signature,
-          documentation: ""
-        ))
-      if result.len >= maxResults:
+      if maybeAddCompletion(word, tag, seen, result, maxResults):
         return
 
   for file, tags in lsp.ctagsCache:
     if file == filePath:
       continue
     for tag in tags:
-      if tag.name.startsWith(word) and not seen.contains(tag.name):
-        seen.incl(tag.name)
-        let kind = case tag.kind
-        of tkProc, tkFunc: CompletionItemKind.Function
-        of tkMethod: CompletionItemKind.Method
-        of tkType: CompletionItemKind.Class
-        of tkVar: CompletionItemKind.Variable
-        of tkLet, tkConst: CompletionItemKind.Value
-        of tkMacro: CompletionItemKind.Function
-        of tkTemplate: CompletionItemKind.Snippet
-        else: CompletionItemKind.Text
-        result.add(CompletionItem(
-          label: tag.name,
-          kind: kind,
-          detail: tag.signature,
-          documentation: ""
-        ))
-      if result.len >= maxResults:
+      if maybeAddCompletion(word, tag, seen, result, maxResults):
         return
 
 proc buildHoverText(tag: Tag): string =
   let kindStr = tagKindName(tag.kind)
-  let displaySig = if tag.signature.len > 0:
-                     kindStr & " " & tag.name & tag.signature
-                   else:
-                     kindStr & " " & tag.name
-  result = "```nim\n" & displaySig & "\n```"
+  var displayLen = kindStr.len + 1 + tag.name.len
+  if tag.signature.len > 0:
+    displayLen += tag.signature.len
+  var docLen = 0
   if tag.docComment.len > 0:
-    result.add("\n\n" & tag.docComment.strip())
+    docLen = 2 + tag.docComment.len
+  var totalLen = 7 + displayLen + 3 + docLen
+  result = newStringOfCap(totalLen)
+  result.add("```nim\n")
+  result.add(kindStr)
+  result.add(' ')
+  result.add(tag.name)
+  if tag.signature.len > 0:
+    result.add(tag.signature)
+  result.add("\n```")
+  if docLen > 0:
+    result.add("\n\n")
+    result.add(tag.docComment.strip())
 
 proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[Hover] =
   let filePath = uriToPath(fileUri)
@@ -307,25 +307,10 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
 
   if matches.len == 0:
     return none(Hover)
-  elif matches.len == 1:
-    return some(Hover(
-      contents: MarkupContent(
-        kind: MarkupKind.Markdown,
-        value: buildHoverText(matches[0])
-      )
-    ))
-  else:
-    var text = ""
-    for i, tag in matches:
-      text.add(buildHoverText(tag))
-      if i < matches.high:
-        text.add("\n\n---\n\n")
-    return some(Hover(
-      contents: MarkupContent(
-        kind: MarkupKind.Markdown,
-        value: text
-      )
-    ))
+  var contents = newSeqOfCap[string](matches.len)
+  for tag in matches:
+    contents.add(buildHoverText(tag))
+  return some(Hover(contents: contents))
 
 proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[SignatureHelp] =
   let filePath = uriToPath(fileUri)
@@ -438,14 +423,8 @@ proc scanWordOccurrences(text, word: string): seq[tuple[line, col: int]] =
       result.add((line: line, col: idx - lineStart))
     pos = idx + word.len
 
-proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, includeDeclaration: bool): seq[Location] =
-  let filePath = uriToPath(fileUri)
-  let content = lsp.openFiles.getOrDefault(filePath, "")
-  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
-  if word.len == 0:
-    return
+proc findWordInWorkspace(lsp: MinLSP, word: string): seq[tuple[path: string, occ: tuple[line, col: int]]] =
   var processed = initHashSet[string]()
-  # Search all workspace files for occurrences
   for path in lsp.ctagsCache.keys:
     processed.incl(path)
     let text = try:
@@ -453,26 +432,29 @@ proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, inc
     except CatchableError:
       continue
     for occ in scanWordOccurrences(text, word):
-      result.add(Location(
-        uri: pathToUri(path),
-        range: Range(
-          startPos: Position(line: occ.line, character: occ.col),
-          endPos: Position(line: occ.line, character: occ.col + word.len)
-        )
-      ))
-  # Also search open files that might not be in ctagsCache yet
+      result.add((path: path, occ: occ))
   for path in lsp.openFiles.keys:
     if path in processed:
       continue
     let text = lsp.openFiles[path]
     for occ in scanWordOccurrences(text, word):
-      result.add(Location(
-        uri: pathToUri(path),
-        range: Range(
-          startPos: Position(line: occ.line, character: occ.col),
-          endPos: Position(line: occ.line, character: occ.col + word.len)
-        )
-      ))
+      result.add((path: path, occ: occ))
+
+proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, includeDeclaration: bool): seq[Location] =
+  let filePath = uriToPath(fileUri)
+  let content = lsp.openFiles.getOrDefault(filePath, "")
+  let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
+  if word.len == 0:
+    return
+  let matches = lsp.findWordInWorkspace(word)
+  for m in matches:
+    result.add(Location(
+      uri: pathToUri(m.path),
+      range: Range(
+        startPos: Position(line: m.occ.line, character: m.occ.col),
+        endPos: Position(line: m.occ.line, character: m.occ.col + word.len)
+      )
+    ))
 
 proc getWorkspaceSymbols*(lsp: MinLSP, query: string): seq[DocumentSymbol] =
   if query.len == 0:
@@ -555,22 +537,9 @@ proc renameSymbol*(lsp: MinLSP, fileUri: string, line: int, character: int, newN
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
   if word.len == 0 or newName.len == 0:
     return
-  var processed = initHashSet[string]()
-  for path in lsp.ctagsCache.keys:
-    processed.incl(path)
-    let text = try:
-      if lsp.openFiles.hasKey(path): lsp.openFiles[path] else: readFile(path)
-    except CatchableError:
-      continue
-    for occ in scanWordOccurrences(text, word):
-      result.add((uri: pathToUri(path), startLine: occ.line, startCol: occ.col, endLine: occ.line, endCol: occ.col + word.len))
-  # Also include open files that might not be in ctagsCache yet
-  for path in lsp.openFiles.keys:
-    if path in processed:
-      continue
-    let text = lsp.openFiles[path]
-    for occ in scanWordOccurrences(text, word):
-      result.add((uri: pathToUri(path), startLine: occ.line, startCol: occ.col, endLine: occ.line, endCol: occ.col + word.len))
+  let matches = lsp.findWordInWorkspace(word)
+  for m in matches:
+    result.add((uri: pathToUri(m.path), startLine: m.occ.line, startCol: m.occ.col, endLine: m.occ.line, endCol: m.occ.col + word.len))
 
 proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
   let filePath = uriToPath(fileUri)
@@ -637,27 +606,31 @@ proc initLSP() =
 
 proc scanProjectAsync*(lsp: MinLSP) =
   if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
-    infoLog("Scanning project...")
-    let tags = generateCtagsForDir([lsp.rootPath], excludes = ["deps", "tests"], includePrivate = true)
-    for tag in tags:
-      if not lsp.ctagsCache.hasKey(tag.file):
-        lsp.ctagsCache[tag.file] = @[]
-      lsp.ctagsCache[tag.file].add(tag)
-    lsp.rebuildTagIndex()
-    infoLog("Scanned project, found ", $tags.len, " tags")
+    let (projectRoots, stdlibRoots, depRoots) = discoverScanRoots(lsp.rootPath)
 
-    infoLog("Scanning standard library...")
-    var stdRoots: seq[string]
-    for pth in searchPaths():
-      if pth.len == 0 or not dirExists(pth):
-        continue
-      # Only include actual stdlib paths (ending in /lib), not nim root or packages
-      if not (pth.endsWith("/lib") or pth.endsWith("\\lib")):
-        continue
-      stdRoots.add(pth)
-    if stdRoots.len > 0:
-      let stdTags = generateCtagsForDir(stdRoots, excludes = ["deps", "tests"],
-                                          includePrivate = true)
+    if projectRoots.len > 0:
+      infoLog("Scanning project...")
+      let tags = generateCtagsForDir(projectRoots, excludes = ["tests"], includePrivate = false)
+      for tag in tags:
+        if not lsp.ctagsCache.hasKey(tag.file):
+          lsp.ctagsCache[tag.file] = @[]
+        lsp.ctagsCache[tag.file].add(tag)
+      lsp.rebuildTagIndex()
+      infoLog("Scanned project, found ", $tags.len, " tags")
+
+    if depRoots.len > 0:
+      infoLog("Scanning dependencies...")
+      let depTags = generateCtagsForDir(depRoots, excludes = ["tests"], includePrivate = false)
+      for tag in depTags:
+        if not lsp.ctagsCache.hasKey(tag.file):
+          lsp.ctagsCache[tag.file] = @[]
+        lsp.ctagsCache[tag.file].add(tag)
+      lsp.rebuildTagIndex()
+      infoLog("Scanned dependencies, found ", $depTags.len, " tags")
+
+    if stdlibRoots.len > 0:
+      infoLog("Scanning standard library...")
+      let stdTags = generateCtagsForDir(stdlibRoots, excludes = ["tests"], includePrivate = false)
       for tag in stdTags:
         if not lsp.ctagsCache.hasKey(tag.file):
           lsp.ctagsCache[tag.file] = @[]
@@ -765,17 +738,15 @@ proc handleTextDocumentHover(lsp: MinLSP, params: JsonNode): JsonNode =
   let position = params["position"]
   let line = position["line"].getInt
   let character = position["character"].getInt
-  
+
   let hoverOpt = lsp.getHover(uri, line, character)
-  
+
   if hoverOpt.isSome:
     let hover = hoverOpt.get()
-    result = %*{
-      "contents": {
-        "kind": $hover.contents.kind,
-        "value": hover.contents.value
-      }
-    }
+    if hover.contents.len == 1:
+      result = %*{"contents": hover.contents[0]}
+    else:
+      result = %*{"contents": hover.contents}
   else:
     result = newJNull()
 
