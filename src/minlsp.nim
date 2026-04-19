@@ -15,6 +15,9 @@ type
     conf: ConfigRef
     cache: IdentCache
     tagIndex: Table[string, seq[Tag]]   # maps tag.name -> all tags with that name
+    depFiles: HashSet[string]           # tracks files indexed from nimble deps
+    nimbleFile: string                  # path to project .nimble file
+    nimbleMtime: Time                   # last known mtime of .nimble file
 
   Position* = object
     line*: int
@@ -137,7 +140,10 @@ proc initMinLSP*(): MinLSP =
     shutdownRequested: false,
     conf: conf,
     cache: newIdentCache(),
-    tagIndex: initTable[string, seq[Tag]]()
+    tagIndex: initTable[string, seq[Tag]](),
+    depFiles: initHashSet[string](),
+    nimbleFile: "",
+    nimbleMtime: initTime(0, 0)
   )
 
 proc rebuildTagIndex(lsp: MinLSP) =
@@ -148,6 +154,8 @@ proc rebuildTagIndex(lsp: MinLSP) =
       if not lsp.tagIndex.hasKey(normName):
         lsp.tagIndex[normName] = @[]
       lsp.tagIndex[normName].add(tag)
+
+proc ensureUpToDate(lsp: MinLSP)
 
 proc generateCtagsForFile*(lsp: MinLSP, filePath: string): seq[Tag] =
   try:
@@ -194,6 +202,7 @@ proc extractWordAtPosition(content: string, line, character: int): tuple[word: s
   result.colEnd = wordEnd
 
 proc findDefinition*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[Location] =
+  ensureUpToDate(lsp)
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
@@ -241,6 +250,7 @@ proc maybeAddCompletion(word: string, tag: Tag, seen: var HashSet[string], resul
   return false
 
 proc getCompletions*(lsp: MinLSP, fileUri: string, line: int, character: int): seq[CompletionItem] =
+  ensureUpToDate(lsp)
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
@@ -283,6 +293,7 @@ proc buildHoverText(tag: Tag): string =
     result.add(tag.docComment.strip())
 
 proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[Hover] =
+  ensureUpToDate(lsp)
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
@@ -313,6 +324,7 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
   return some(Hover(contents: contents))
 
 proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[SignatureHelp] =
+  ensureUpToDate(lsp)
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let currentLine = extractLine(content, line)
@@ -441,6 +453,7 @@ proc findWordInWorkspace(lsp: MinLSP, word: string): seq[tuple[path: string, occ
       result.add((path: path, occ: occ))
 
 proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, includeDeclaration: bool): seq[Location] =
+  ensureUpToDate(lsp)
   let filePath = uriToPath(fileUri)
   let content = lsp.openFiles.getOrDefault(filePath, "")
   let (word, _, _, _, _) = extractWordAtPosition(content, line, character)
@@ -457,6 +470,7 @@ proc getReferences*(lsp: MinLSP, fileUri: string, line: int, character: int, inc
     ))
 
 proc getWorkspaceSymbols*(lsp: MinLSP, query: string): seq[DocumentSymbol] =
+  ensureUpToDate(lsp)
   if query.len == 0:
     return
   let lowerQuery = query.toLowerAscii()
@@ -542,6 +556,7 @@ proc renameSymbol*(lsp: MinLSP, fileUri: string, line: int, character: int, newN
     result.add((uri: pathToUri(m.path), startLine: m.occ.line, startCol: m.occ.col, endLine: m.occ.line, endCol: m.occ.col + word.len))
 
 proc getDocumentSymbols*(lsp: MinLSP, fileUri: string): seq[DocumentSymbol] =
+  ensureUpToDate(lsp)
   let filePath = uriToPath(fileUri)
   
   if lsp.ctagsCache.hasKey(filePath):
@@ -604,9 +619,56 @@ var lspInstance: MinLSP
 proc initLSP() =
   lspInstance = initMinLSP()
 
+proc scanDependencies(lsp: MinLSP) =
+  ## Scan nimble dependencies and track them separately so they can
+  ## be removed later when the `.nimble` file changes.
+  let (_, _, depRoots) = discoverScanRoots(lsp.rootPath)
+
+  # Remove old dependency tags
+  for file in lsp.depFiles:
+    lsp.ctagsCache.del(file)
+  lsp.depFiles.clear()
+
+  if depRoots.len > 0:
+    infoLog("Scanning dependencies...")
+    let depTags = generateCtagsForDir(depRoots, excludes = ["tests"], includePrivate = false)
+    for tag in depTags:
+      if not lsp.ctagsCache.hasKey(tag.file):
+        lsp.ctagsCache[tag.file] = @[]
+      lsp.ctagsCache[tag.file].add(tag)
+      lsp.depFiles.incl(tag.file)
+    lsp.rebuildTagIndex()
+    infoLog("Scanned dependencies, found ", $depTags.len, " tags")
+
+proc updateNimbleTracking(lsp: MinLSP) =
+  ## Record the project's .nimble file path and mtime for change detection.
+  lsp.nimbleFile = ""
+  lsp.nimbleMtime = initTime(0, 0)
+  if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
+    for kind, path in walkDir(lsp.rootPath):
+      if kind == pcFile and path.endsWith(".nimble"):
+        lsp.nimbleFile = path
+        lsp.nimbleMtime = getFileInfo(path).lastWriteTime
+        break
+
+proc checkNimbleChanged(lsp: MinLSP) =
+  ## If the project's `.nimble` file has been modified since the last
+  ## scan, rescan dependencies.
+  if lsp.nimbleFile.len == 0 or not fileExists(lsp.nimbleFile):
+    return
+  let currentMtime = getFileInfo(lsp.nimbleFile).lastWriteTime
+  if currentMtime != lsp.nimbleMtime:
+    lsp.nimbleMtime = currentMtime
+    scanDependencies(lsp)
+
+proc ensureUpToDate(lsp: MinLSP) =
+  ## Check for external changes (e.g. `.nimble` file edited) before
+  ## serving a lookup request.
+  checkNimbleChanged(lsp)
+
 proc scanProjectAsync*(lsp: MinLSP) =
   if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
-    let (projectRoots, stdlibRoots, depRoots) = discoverScanRoots(lsp.rootPath)
+    let (projectRoots, stdlibRoots, _) = discoverScanRoots(lsp.rootPath)
 
     if projectRoots.len > 0:
       infoLog("Scanning project...")
@@ -618,16 +680,6 @@ proc scanProjectAsync*(lsp: MinLSP) =
       lsp.rebuildTagIndex()
       infoLog("Scanned project, found ", $tags.len, " tags")
 
-    if depRoots.len > 0:
-      infoLog("Scanning dependencies...")
-      let depTags = generateCtagsForDir(depRoots, excludes = ["tests"], includePrivate = false)
-      for tag in depTags:
-        if not lsp.ctagsCache.hasKey(tag.file):
-          lsp.ctagsCache[tag.file] = @[]
-        lsp.ctagsCache[tag.file].add(tag)
-      lsp.rebuildTagIndex()
-      infoLog("Scanned dependencies, found ", $depTags.len, " tags")
-
     if stdlibRoots.len > 0:
       infoLog("Scanning standard library...")
       let stdTags = generateCtagsForDir(stdlibRoots, excludes = ["tests"], includePrivate = false)
@@ -637,6 +689,9 @@ proc scanProjectAsync*(lsp: MinLSP) =
         lsp.ctagsCache[tag.file].add(tag)
       lsp.rebuildTagIndex()
       infoLog("Scanned stdlib, found ", $stdTags.len, " tags")
+
+    scanDependencies(lsp)
+    updateNimbleTracking(lsp)
 
 proc handleInitialize(lsp: MinLSP, params: JsonNode): JsonNode =
   # Extract root path from initialize params

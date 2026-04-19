@@ -599,17 +599,34 @@ proc parseNimbleRequires*(nimblePath: string): seq[string] =
         result.add(depName)
       inc i  # skip closing quote
 
+proc extractPkgNameFromDir(dirName: string): string =
+  ## Extract the package name from a nimble install directory like
+  ## "jsony-1.0.0" or "jsony-1.0.0-abcdef12". Everything before the
+  ## first version-looking segment (starting with a digit) is the name.
+  var parts = dirName.split('-')
+  for i in 0 ..< parts.len:
+    if parts[i].len > 0 and parts[i][0] in {'0'..'9'}:
+      return parts[0..<i].join("-")
+  return dirName
+
+proc normalizePkgName(name: string): string =
+  ## Normalize a package name for comparison by lowercasing and
+  ## converting hyphens to underscores (Nimble treats them as equivalent).
+  result = name.toLowerAscii().replace('-', '_')
+
 proc resolveNimbleDep*(pkgName: string, nimblePaths: seq[string]): string =
   ## Find the installation directory of a Nimble package by name.
   if pkgName.len == 0:
     return ""
+  let target = normalizePkgName(pkgName)
   for basePath in nimblePaths:
     if not dirExists(basePath):
       continue
     for kind, path in walkDir(basePath):
       if kind == pcDir:
         let dirName = splitFile(path).name
-        if dirName.startsWith(pkgName & "-") or dirName == pkgName:
+        let extracted = extractPkgNameFromDir(dirName)
+        if normalizePkgName(extracted) == target:
           return path
   return ""
 

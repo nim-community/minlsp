@@ -505,6 +505,23 @@ block resolve_nimble_dep_finds_package:
   doAssert found.endsWith("jsony-1.1.0")
   removeDir(testDir)
 
+block resolve_nimble_dep_avoids_prefix_collision:
+  let testDir = getTempDir() / "minlsp_nimblepkgs_test2"
+  createDir(testDir)
+  createDir(testDir / "jsonyser-1.0.0")
+  let found = resolveNimbleDep("jsony", @[testDir])
+  doAssert found.len == 0, "should not match jsonyser as jsony"
+  removeDir(testDir)
+
+block resolve_nimble_dep_handles_hyphen_underscore:
+  let testDir = getTempDir() / "minlsp_nimblepkgs_test3"
+  createDir(testDir)
+  createDir(testDir / "json-serde-1.0.0")
+  let found = resolveNimbleDep("json_serde", @[testDir])
+  doAssert found.len > 0, "should match json-serde with json_serde"
+  doAssert found.endsWith("json-serde-1.0.0")
+  removeDir(testDir)
+
 block is_stdlib_path_false_for_random_dir:
   let testDir = getTempDir() / "minlsp_notstdlib"
   createDir(testDir)
