@@ -24,7 +24,7 @@ block stdlib_tags_available_after_scan:
   writeFile(testFile, "proc main() = echo \"hi\"\n")
 
   lsp.rootPath = testDir
-  waitFor scanProjectAsync(lsp)
+  scanProjectAsync(lsp)
 
   # Should have scanned both the workspace and stdlib
   doAssert lsp.ctagsCache.len > 0
@@ -47,7 +47,7 @@ block workspace_symbols_finds_stdlib_symbols:
   writeFile(testFile, "proc main() = discard\n")
 
   lsp.rootPath = testDir
-  waitFor scanProjectAsync(lsp)
+  scanProjectAsync(lsp)
 
   # Look up a well-known stdlib symbol
   let symbols = lsp.getWorkspaceSymbols("parseInt")
@@ -64,7 +64,7 @@ block completions_include_stdlib_symbols:
   writeFile(testFile, content)
 
   lsp.rootPath = testDir
-  waitFor scanProjectAsync(lsp)
+  scanProjectAsync(lsp)
 
   lsp.updateFile("file://" & testFile, content)
 

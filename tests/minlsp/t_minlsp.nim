@@ -285,7 +285,7 @@ block get_hover_returns_none_for_unknown_word:
   let hoverOpt = lsp.getHover("file://" & testFile, 0, 500)
   doAssert not hoverOpt.isSome
 
-block get_hover_returns_exact_definition_on_definition_line:
+block get_hover_returns_all_overloads:
   let testFile = createTempTestFile("proc foo(x: int): int =\n  x + 1\n\nproc foo(x: string): string =\n  x & \"!\"\n")
   let lsp = initMinLSP()
   discard lsp.generateCtagsForFile(testFile)
@@ -295,12 +295,7 @@ block get_hover_returns_exact_definition_on_definition_line:
   let hover1 = lsp.getHover("file://" & testFile, 0, 6)
   doAssert hover1.isSome
   doAssert hover1.get().contents.value.contains("foo(x: int): int")
-  doAssert not hover1.get().contents.value.contains("foo(x: string): string")
-
-  let hover2 = lsp.getHover("file://" & testFile, 3, 6)
-  doAssert hover2.isSome
-  doAssert hover2.get().contents.value.contains("foo(x: string): string")
-  doAssert not hover2.get().contents.value.contains("foo(x: int): int")
+  doAssert hover1.get().contents.value.contains("foo(x: string): string")
 
 cleanupTempFiles()
 

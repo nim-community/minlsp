@@ -2,6 +2,7 @@ import std/[os, strutils, times]
 
 var logFile: File = nil
 var quietMode* = false  # Set to true to suppress console output
+var logInitAttempted = false
 
 proc getLogPath(): string =
   let homeDir = getHomeDir()
@@ -14,13 +15,17 @@ proc getLogPath(): string =
   result = logDir / "minlsp.log"
 
 proc initLogFile() =
-  if logFile == nil:
-    let logPath = getLogPath()
-    try:
-      logFile = open(logPath, fmAppend)
-      logFile.writeLine("\n--- minlsp started at ", $now(), " ---")
-      logFile.flushFile()
-    except:
+  if logFile != nil or logInitAttempted:
+    return
+
+  logInitAttempted = true
+  let logPath = getLogPath()
+  try:
+    logFile = open(logPath, fmAppend)
+    logFile.writeLine("\n--- minlsp started at ", $now(), " ---")
+    logFile.flushFile()
+  except:
+    if not quietMode:
       stderr.writeLine("Failed to open log file: ", getCurrentExceptionMsg())
 
 proc errorLog*(args: varargs[string]) =

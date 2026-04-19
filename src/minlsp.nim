@@ -144,9 +144,10 @@ proc rebuildTagIndex(lsp: MinLSP) =
   lsp.tagIndex.clear()
   for filePath, tags in lsp.ctagsCache:
     for tag in tags:
-      if not lsp.tagIndex.hasKey(tag.name):
-        lsp.tagIndex[tag.name] = @[]
-      lsp.tagIndex[tag.name].add(tag)
+      let normName = nimIdentNormalize(tag.name)
+      if not lsp.tagIndex.hasKey(normName):
+        lsp.tagIndex[normName] = @[]
+      lsp.tagIndex[normName].add(tag)
 
 proc generateCtagsForFile*(lsp: MinLSP, filePath: string): seq[Tag] =
   try:
@@ -289,13 +290,20 @@ proc getHover*(lsp: MinLSP, fileUri: string, line: int, character: int): Option[
     return none(Hover)
 
   var matches: seq[Tag] = @[]
-  let candidates = lsp.tagIndex.getOrDefault(word)
+  let normWord = nimIdentNormalize(word)
+  let candidates = lsp.tagIndex.getOrDefault(normWord)
   for tag in candidates:
-    if tag.file == filePath and (tag.line - 1) == line:
-      matches.add(tag)
-  if matches.len == 0:
-    for tag in candidates:
-      matches.add(tag)
+    matches.add(tag)
+
+  # Deduplicate matches (same symbol may appear from multiple sources)
+  var seen = initHashSet[string]()
+  var uniqueMatches: seq[Tag] = @[]
+  for tag in matches:
+    let key = tag.file & ":" & $tag.line & ":" & tag.signature & ":" & tag.docComment
+    if not seen.contains(key):
+      seen.incl(key)
+      uniqueMatches.add(tag)
+  matches = uniqueMatches
 
   if matches.len == 0:
     return none(Hover)
@@ -365,20 +373,25 @@ proc getSignatureHelp*(lsp: MinLSP, fileUri: string, line: int, character: int):
   let sigKinds = {tkProc, tkFunc, tkMethod, tkMacro, tkTemplate, tkConverter, tkIterator}
   var matches: seq[Tag] = @[]
 
-  let candidates = lsp.tagIndex.getOrDefault(word)
+  let normWord = nimIdentNormalize(word)
+  let candidates = lsp.tagIndex.getOrDefault(normWord)
   for tag in candidates:
     if tag.kind notin sigKinds:
       continue
-    if tag.file == filePath and (tag.line - 1) == line:
-      matches.add(tag)
-  if matches.len == 0:
-    for tag in candidates:
-      if tag.kind notin sigKinds:
-        continue
-      matches.add(tag)
+    matches.add(tag)
 
   if matches.len == 0:
     return none(SignatureHelp)
+
+  # Deduplicate matches (same symbol may appear from multiple sources)
+  var seen = initHashSet[string]()
+  var uniqueMatches: seq[Tag] = @[]
+  for tag in matches:
+    let key = tag.file & ":" & $tag.line & ":" & tag.signature & ":" & tag.docComment
+    if not seen.contains(key):
+      seen.incl(key)
+      uniqueMatches.add(tag)
+  matches = uniqueMatches
 
   var signatures: seq[SignatureInformation] = @[]
   for tag in matches:
@@ -622,7 +635,7 @@ var lspInstance: MinLSP
 proc initLSP() =
   lspInstance = initMinLSP()
 
-proc scanProjectAsync*(lsp: MinLSP) {.async.} =
+proc scanProjectAsync*(lsp: MinLSP) =
   if lsp.rootPath.len > 0 and dirExists(lsp.rootPath):
     infoLog("Scanning project...")
     let tags = generateCtagsForDir([lsp.rootPath], excludes = ["deps", "tests"], includePrivate = true)
@@ -638,8 +651,8 @@ proc scanProjectAsync*(lsp: MinLSP) {.async.} =
     for pth in searchPaths():
       if pth.len == 0 or not dirExists(pth):
         continue
-      # Skip dependency directories to avoid indexing installed packages as stdlib
-      if pth.endsWith("nimble") or pth.contains("/deps/") or pth.contains("\\deps\\"):
+      # Only include actual stdlib paths (ending in /lib), not nim root or packages
+      if not (pth.endsWith("/lib") or pth.endsWith("\\lib")):
         continue
       stdRoots.add(pth)
     if stdRoots.len > 0:
@@ -1020,7 +1033,7 @@ proc handleMessage(lsp: MinLSP, message: LSPMessage, outs: AsyncFile) {.async.} 
   of "initialize":
     debugLog("Processing initialize request...")
     result = handleInitialize(lsp, params)
-    asyncCheck scanProjectAsync(lsp)
+    scanProjectAsync(lsp)
     debugLog("Initialize handled")
   
   of "shutdown":
