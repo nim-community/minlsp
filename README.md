@@ -133,8 +133,8 @@ minlsp/
 | Signature Help | ✅ | ✅ | ✅ |
 | Rename | ✅ (text-based) | ❌ | ✅ |
 | Formatting | ❌ | ✅ | ✅ |
-| Memory Usage | Low | Medium | High |
-| Startup Time | Fast | Medium | Slow |
+| Memory Usage | Low | Medium | Low |
+| Startup Time | Fast | Medium | Medium |
 
 minlsp trades some advanced features for speed and simplicity.
 
