@@ -355,8 +355,10 @@ proc collectTagsStandalone(file: string, includePrivate: bool, projectDir: strin
     var conf = newConfigRef()
     conf.errorMax = high(int)
     conf.projectPath = AbsoluteDir(projectDir)
-    conf.setNote(warnLongLiterals, false)
-    conf.setNote(warnInconsistentSpacing, false)
+    when declared(warnLongLiterals):
+      conf.setNote(warnLongLiterals, false)
+    when declared(warnInconsistentSpacing):
+      conf.setNote(warnInconsistentSpacing, false)
     var cache = newIdentCache()
     result = collectTagsForFile(conf, cache, file, includePrivate)
 
