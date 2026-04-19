@@ -667,6 +667,8 @@ proc discoverScanRoots*(projectRoot: string,
       let deps = parseNimbleRequires(nimbleFile)
       let pkgPaths = if extraPkgPaths.len > 0: extraPkgPaths else: nimblePaths()
       for dep in deps:
+        if dep.toLowerAscii() == "nim":
+          continue
         let depPath = resolveNimbleDep(dep, pkgPaths)
         if depPath.len > 0:
           result.depRoots.addRootIfDir(depPath)

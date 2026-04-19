@@ -1158,7 +1158,49 @@ proc main(ins: AsyncFile, outs: AsyncFile) {.async.} =
   infoLog("minlsp server stopped")
 
 when isMainModule:
+  import std/parseopt
+
+  proc showScanPaths(projectRoot: string) =
+    ## Print the directories that would be scanned for a given project root.
+    let roots = discoverScanRoots(projectRoot)
+
+    echo "Project roots (", roots.projectRoots.len, "):"
+    for r in roots.projectRoots:
+      echo "  ", r
+
+    echo ""
+    echo "Stdlib roots (", roots.stdlibRoots.len, "):"
+    for r in roots.stdlibRoots:
+      echo "  ", r
+
+    echo ""
+    echo "Dependency roots (", roots.depRoots.len, "):"
+    for r in roots.depRoots:
+      echo "  ", r
+
   var
-    ins = newAsyncFile(stdin.getOsFileHandle().AsyncFD)
-    outs = newAsyncFile(stdout.getOsFileHandle().AsyncFD)
-  waitFor main(ins, outs)
+    showScanPathsDir = ""
+
+  var p = initOptParser(commandLineParams())
+  while true:
+    p.next()
+    case p.kind
+    of cmdEnd: break
+    of cmdShortOption, cmdLongOption:
+      case p.key
+      of "show-scan-paths":
+        showScanPathsDir = p.val
+      else:
+        stderr.writeLine "Unknown option: --", p.key
+        quit(1)
+    of cmdArgument:
+      stderr.writeLine "Unknown argument: ", p.key
+      quit(1)
+
+  if showScanPathsDir.len > 0:
+    showScanPaths(showScanPathsDir)
+  else:
+    var
+      ins = newAsyncFile(stdin.getOsFileHandle().AsyncFD)
+      outs = newAsyncFile(stdout.getOsFileHandle().AsyncFD)
+    waitFor main(ins, outs)
